@@ -1,0 +1,122 @@
+{
+  "111": {
+    "savedAt": "2026-03-02T15:12:38.521Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "100001",
+      "totalLevy": 1764,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 4674.6,
+      "transactionDate": "2025-11-12T08:41:00Z",
+      "totalAmount": 29400,
+      "voucherAmount": 0,
+      "businessPartnerName": "ACCRA MALL",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "TXC00389165855",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "Gas Oil (Cell Sites)",
+          "quantity": 2000,
+          "levyAmountA": 735,
+          "levyAmountB": 735,
+          "levyAmountC": 294,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 14.7
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "100001",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-626E-NS221",
+          "ysdcintdata": "XWEI-RWK5-QXLG-EOKG-PGNL-RNMC-QI",
+          "ysdcregsig": "BJQT-ILQ4-EMU5-EQTP",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/02 15:13:27",
+          "ysdctime": "2026/03/02 15:13:27",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=EwoVRJBY/ywZ9YLcSNGcPGE8nBVgjDrWEXFwXPR8Rcfroz7dQlbYyBTE124gMZ+PxMRt+razh8fP58WHVWnTRJTQhSR4j8+C4fQSF3eJAFILVWKhaQi7fPmeR0LNzcZSuoFrsAXhPT0ERkm9kOv412ovR3LdChlkr/QXlWUVpt/v0dmM6PxfgRrrCBYIM61DuAuThX2Rt4XvY9mZ0j+BdYGqrwFJ8xRd9lgFOIETpBazFxJsAVaTgHHQ/jTppIg1zFYh/p7w/rtJaNwxN2tJuQoevO9umoAj48d8SzwJIo76rGfJ/XHl8J1f1vc5EZg3&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
+  "117": {
+    "savedAt": "2026-03-02T15:53:32.021Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0001",
+      "totalLevy": 1884,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 4992.6,
+      "transactionDate": "2025-11-20T17:12:00Z",
+      "totalAmount": 31400,
+      "voucherAmount": 0,
+      "businessPartnerName": "ADB LABONE",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "ITM-00001",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "Gas Oil (Diesel)",
+          "quantity": 2000,
+          "levyAmountA": 785,
+          "levyAmountB": 785,
+          "levyAmountC": 314,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 15.7
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0001",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-626E-NS230",
+          "ysdcintdata": "GF6S-VM2N-V5JD-FMV6-RHZ3-B4TB-HA",
+          "ysdcregsig": "VZWK-C7JH-V573-2DW3",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/02 15:54:21",
+          "ysdctime": "2026/03/02 15:54:21",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=EwoVRJBY/ywZ9YLcSNGcPPkWW9FtCvxMfSxM4yUgBG79eC4V/+UcQ+KGB0XuLNQ5PzA28KYkhBUuFp3+r8o133BDf+z0X9ybxPl3bzoaT0WggPo/AJftq3EsW0VBlUInr/sN2IiArEnba0rryRZjdMdWZWogf3q1icp0G2B5gyHeB2ftJIy0cYXVjkcSQ2p6j4UWxEv3L0ImpBuVa8R6ZI2AlhKefLRYP0acKGu7QQ7b5Ogq7SWg13WMXpQ1IO4z9yVr6JKJ21HW+RR5h1ydR2Wm5yVIpmfJ9aK/OAU2uHc3r2KlwlPKfryAZsULbaBj&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  }
+}
