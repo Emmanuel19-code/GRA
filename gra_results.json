@@ -118,5 +118,185 @@
         "status": "SUCCESS"
       }
     }
+  },
+  "20717": {
+    "savedAt": "2026-03-04T08:59:28.504Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0529",
+      "totalLevy": 187.5,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 562.5,
+      "transactionDate": "2026-02-02T17:20:00Z",
+      "totalAmount": 3750,
+      "voucherAmount": 0,
+      "businessPartnerName": "AD POOLS",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "102524",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "Hydro 1 Plus",
+          "quantity": 50,
+          "levyAmountA": 93.75,
+          "levyAmountB": 93.75,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 75
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0529",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS16",
+          "ysdcintdata": "WEBC-YOPH-O3XL-XL6L-E4DL-YWIC-UI",
+          "ysdcregsig": "OFJW-4LKL-7NLV-EG4U",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 09:00:20",
+          "ysdctime": "2026/03/04 09:00:20",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=nCmAgix63pQSdMVDRVA6GAAN3YIHwGHeUwNI5DDoQHQPyKotUjl1GU6vYeAdRdqSqY0A0UfJyy/IGOiP0FxZ/yakuDq7MeFfPZfNECu3qPKaGveEvVNOdnouzd3tpBDD6R9KrzlMVO1SoAUU7ZMA0p6UI8HVAJOg/RPsxp2MdhAvJL2MB3GDvj0bsBcXho9ZLBjQzkNzThAAs2pfEkgvZxh+ZIOOXVOGkJ2VNEPMfJZXZfeIs6iBucyIeASpI9kHfW2Gnp38aZFhFQjCYzwf023sqj7nMCL3kAdJqhBwr4A=&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
+  "20727": {
+    "savedAt": "2026-03-04T08:33:47.119Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "100055",
+      "totalLevy": 1875,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 5625,
+      "transactionDate": "2026-03-03T15:13:00Z",
+      "totalAmount": 37500,
+      "voucherAmount": 0,
+      "businessPartnerName": "2HB FLORIA APARTMENT",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "102601",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "Centrament Proof Special P",
+          "quantity": 1,
+          "levyAmountA": 937.5,
+          "levyAmountB": 937.5,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 37500
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "100055",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS11",
+          "ysdcintdata": "OWKL-CLCZ-6B5Z-NMKN-YXZ5-PXON-UE",
+          "ysdcregsig": "ITPE-ZTVL-WF56-XYQM",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 08:34:39",
+          "ysdctime": "2026/03/04 08:34:39",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=nCmAgix63pQSdMVDRVA6GIZNVeyWf//AlRjho1yPK1M7UMixEVdAZJ6D27Yi/3xLkToBBOzXxtjRH/YhfvRddc6xMH745I5fT0wbWoDB91VRvR+AMzdQXGAH2YbFBkm6dCjbXXcwe22tPT2IpSS+8Q2nutPEWhNCkE5urfvPm+f4J3yJvX9T2ym3Do/aSytHO3XLmVOXOaMcKlrKTwbo18661G3UYKrZzLr0ahVwXJk19eZZFHWNtobzO7Zm51kqGWAICBqn+rcosf5bBozd8P/72vtQXckzW99vrDt3KkY=&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
+  "20728": {
+    "savedAt": "2026-03-04T08:26:32.198Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "100056",
+      "totalLevy": 1500,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 4500,
+      "transactionDate": "2026-03-03T15:17:00Z",
+      "totalAmount": 30000,
+      "voucherAmount": 0,
+      "businessPartnerName": "11-11 development",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "102601",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "Centrament Proof Special P",
+          "quantity": 1,
+          "levyAmountA": 750,
+          "levyAmountB": 750,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 30000
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "100056",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS10",
+          "ysdcintdata": "GKB6-YHAX-XOG5-QBU7-CJII-FNU5-S4",
+          "ysdcregsig": "TV63-EI6F-DGBJ-7XRP",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 08:27:24",
+          "ysdctime": "2026/03/04 08:27:24",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=EwoVRJBY/ywZ9YLcSNGcPOv7CfgQ3Hmjd9cn8Sn4fDirdyew0easFT8voUv+bRTa6o0RJfajdWDen8glOaQfw+RR9pRQEeKuizcmgSBU86PI6BlQ3hUSv8tHsoorO9q2Ru+Hr4GlSyC22hXXINK2j42L6Kbj1cENmPmPYmKqMpxtXDa+Ht63fq8l6cHVB9tvqG7KBpP4JuU25XwWsw0m9ZKjawZ7hl2G8Dc4isizWOos0n3M/Lz1ixwjwxj0YfHMeH+3P4uA+COZVyNXXRcVXp/A+rbq4m1hr5jzp2CY6Aw=&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
   }
 }

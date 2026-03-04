@@ -13,7 +13,7 @@
  *  - On failure: shows the real GRA error (HTTP + body)
  *  - Export SUCCESS response as PDF: /api/gra/post-result/:docEntry/pdf
  *
- * REFUNDS (STRICT, based on your samples):
+ * REFUNDS (NEW - STRICT, based on your samples):
  *  - Full refund posts to:     /vsdc/api/v1/taxpayer/<code>/invoice   with flag: REFUND
  *  - Partial refund posts to:  /vsdc/api/v1/taxpayer/<code>/invoice   with flag: PARTIAL_REFUND (reference required)
  *  - Refund cancellation posts:/vsdc/api/v1/taxpayer/<code>/cancellation with flag: REFUND_CANCELATION
@@ -25,19 +25,14 @@
  * ItemCode mapping SAP->GRA via env:
  *   GRA_ITEM_CODE_MAP_JSON={"ITM-00002":"TXC00389165855"}
  *
- * TAX RULES (UPDATED — NEW REGIME):
- *  - EXCLUSIVE:
- *      - Levy A (NHIL) = 2.5% of BASE
- *      - Levy B (GETFund) = 2.5% of BASE
- *      - Levy C/D/E = 0
- *      - VAT = 15% of BASE   (NOT on base+levy)  <-- See comment where VAT is computed.
- *  - INCLUSIVE:
- *      - We DO NOT calculate levies.
- *      - We DO NOT calculate VAT. VAT is taken from SAP VatSum/VatSumFc/VatSumSys if available else 0.
+ * Default tax model used:
+ *  - Levies A..E computed from BASE using rates
+ *  - VAT = VAT_RATE * (BASE + TOTAL_LEVY)
+ *  - Inclusive factor:
+ *      TOTAL = BASE * (1 + levySumRate + VAT_RATE*(1+levySumRate))
  *
- * SAP CUSTOM FIELD RULE (per your instruction):
- *  - U_TOTALQUANTITY is the "TotalQuantity" (use as quantity)
- *  - U_UNIT PRICE is the "Unit Price" (we support several key variants like U_UNITPRICE / U_UNIT_PRICE / U_UnitPrice)
+ * Levy C date rule:
+ *  - C applies BEFORE GRA_LEVY_C_END_DATE (default 2026-01-01), else 0
  *
  * Required ENV:
  *  - SAP_BASE, SAP_COMPANY, SAP_USER, SAP_PASS
@@ -47,10 +42,11 @@
  *  - GRA_POST_URL=...
  *  - GRA_SECURITY_KEY=...
  *  - GRA_VAT_RATE=0.15
- *  - GRA_LEVY_RATES_JSON={"A":0.025,"B":0.025,"C":0,"D":0,"E":0}
+ *  - GRA_LEVY_RATES_JSON={"A":0.025,"B":0.025,"C":0.01,"D":0,"E":0}
+ *  - GRA_LEVY_C_END_DATE=2026-01-01
  *  - GRA_ITEM_CODE_MAP_JSON=...
  *
- * Refund ENV:
+ * Refund ENV (NEW):
  *  - REFUND_POST_ENABLED=true|false
  *  - REFUND_INVOICE_URL=https://vsdcstaging.vat-gh.com/vsdc/api/v1/taxpayer/<TAXPAYER_CODE>/invoice
  *  - REFUND_CANCEL_URL=https://vsdcstaging.vat-gh.com/vsdc/api/v1/taxpayer/<TAXPAYER_CODE>/cancellation
@@ -99,6 +95,7 @@ const GRA_INVOICE_PREFIX = process.env.GRA_INVOICE_PREFIX || "SAP";
 const GRA_LEVY_MODE = String(process.env.GRA_LEVY_MODE || "rates").toLowerCase(); // rates | override
 
 const GRA_VAT_RATE = Number.isFinite(Number(process.env.GRA_VAT_RATE)) ? Number(process.env.GRA_VAT_RATE) : 0.15;
+const GRA_LEVY_C_END_DATE = (process.env.GRA_LEVY_C_END_DATE || "2026-01-01").slice(0, 10);
 
 // Posting ENV
 const GRA_POST_ENABLED = String(process.env.GRA_POST_ENABLED || "false").toLowerCase() === "true";
@@ -106,11 +103,15 @@ const GRA_POST_URL = process.env.GRA_POST_URL || "";
 const GRA_SECURITY_KEY = process.env.GRA_SECURITY_KEY || "";
 
 // ===================================================================
-// ENV (REFUND)
+// ENV (REFUND) — STRICT based on your samples
 // ===================================================================
 const REFUND_POST_ENABLED = String(process.env.REFUND_POST_ENABLED || "false").toLowerCase() === "true";
+
+// These are the TWO endpoints you shared (invoice + cancellation)
 const REFUND_INVOICE_URL = process.env.REFUND_INVOICE_URL || ""; // .../taxpayer/<code>/invoice
 const REFUND_CANCEL_URL = process.env.REFUND_CANCEL_URL || ""; // .../taxpayer/<code>/cancellation
+
+// They all use SECURITY_KEY with the SAME key you provided
 const REFUND_SECURITY_HEADER = process.env.REFUND_SECURITY_HEADER || "SECURITY_KEY";
 const REFUND_SECURITY_KEY = process.env.REFUND_SECURITY_KEY || GRA_SECURITY_KEY || "";
 
@@ -125,14 +126,13 @@ function parseJsonEnv(s, fallback) {
   }
 }
 
-// NEW REGIME defaults: only A (NHIL) + B (GETFund)
 const GRA_ITEM_CODE_MAP = parseJsonEnv(process.env.GRA_ITEM_CODE_MAP_JSON, {});
 const GRA_LEVY_RATES_BASE = parseJsonEnv(process.env.GRA_LEVY_RATES_JSON, {
-  A: 0.025, // NHIL
-  B: 0.025, // GETFund
-  C: 0.0,
-  D: 0.0,
-  E: 0.0,
+  A: 0.025,
+  B: 0.025,
+  C: 0.01, // default pre-2026
+  D: 0,
+  E: 0,
 });
 const GRA_ITEM_LEVY_OVERRIDE = parseJsonEnv(process.env.GRA_ITEM_LEVY_OVERRIDE_JSON, {});
 
@@ -431,43 +431,16 @@ function safeStr(v) {
   if (v === null || v === undefined) return "";
   return String(v);
 }
-
-function firstFiniteNonNegative(...vals) {
-  for (const v of vals) {
-    const x = Number(v);
-    if (Number.isFinite(x) && x >= 0) return x;
-  }
-  return NaN;
+function isIsoDate10(s) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || "").slice(0, 10));
 }
-
-// >>> YOUR CUSTOM FIELD MAPPING (NEW) <<<
-// U_TOTALQUANTITY is the TotalQuantity (use as quantity)
-// U_UNIT PRICE is the Unit Price (support likely SAP keys)
-function getLineQuantity(ln) {
-  // prefer U_TOTALQUANTITY variants
-  const q = firstFiniteNonNegative(
-    ln.U_TOTALQUANTITY,
-    ln.U_TotalQuantity,
-    ln.U_TOTALQTY,
-    ln.U_TotalQty,
-    ln.TotalQuantity,
-    ln.Quantity
-  );
-  return money(Number.isFinite(q) ? q : 0);
+function date10FromIsoZ(isoZ) {
+  const s = String(isoZ || "");
+  return s.slice(0, 10);
 }
-
-function getLineUnitPrice(ln) {
-  // prefer U_UNIT PRICE variants (common SAP naming patterns)
-  const p = firstFiniteNonNegative(
-    ln.U_UNITPRICE,
-    ln.U_UNIT_PRICE,
-    ln.U_UnitPrice,
-    ln.U_UNITPRC,
-    ln.U_Price,
-    ln.UnitPrice,
-    ln.Price
-  );
-  return money(Number.isFinite(p) ? p : 0);
+function isBeforeDate(date10, cutoff10) {
+  if (!isIsoDate10(date10) || !isIsoDate10(cutoff10)) return false;
+  return date10 < cutoff10;
 }
 
 function toIsoZFromSap(inv) {
@@ -493,7 +466,7 @@ function buildGraInvoiceNumber(inv) {
   return `${GRA_INVOICE_PREFIX}-${raw.padStart(4, "0")}`;
 }
 
-// Mode-aware line amount
+// Mode-aware line amount (critical for inclusive correctness)
 function getLineAmountForMode(ln, calculationType) {
   const mode = String(calculationType || "").toUpperCase();
 
@@ -511,10 +484,9 @@ function getLineAmountForMode(ln, calculationType) {
     if (Number.isFinite(x) && x >= 0) return money(x);
   }
 
-  // fallback: qty * unit price using your U_ fields
-  const qty = getLineQuantity(ln);
-  const price = getLineUnitPrice(ln);
-  if (qty > 0 && price > 0) return money(qty * price);
+  const qty = Number(ln.Quantity);
+  const price = Number(ln.UnitPrice ?? ln.Price);
+  if (Number.isFinite(qty) && Number.isFinite(price)) return money(qty * price);
 
   return 0.0;
 }
@@ -534,9 +506,15 @@ function levyOverrideFor(sapItemCode, graItemCode) {
   return GRA_ITEM_LEVY_OVERRIDE[sapItemCode] || GRA_ITEM_LEVY_OVERRIDE[graItemCode] || null;
 }
 
-// New regime: no date-based levy changes; just return base rates
-function getLevyRatesForDate(_transactionDateIsoZ) {
-  return { ...GRA_LEVY_RATES_BASE };
+function getLevyRatesForDate(transactionDateIsoZ) {
+  const d10 = date10FromIsoZ(transactionDateIsoZ);
+  const base = { ...GRA_LEVY_RATES_BASE };
+  if (!isBeforeDate(d10, GRA_LEVY_C_END_DATE)) base.C = 0;
+  return base;
+}
+
+function inclusiveFactor(levySumRate, vatRate) {
+  return 1 + levySumRate + vatRate * (1 + levySumRate);
 }
 
 function computeLeviesFromBase(base, sapItemCode, graItemCode, rates) {
@@ -571,9 +549,7 @@ function computeLeviesFromBase(base, sapItemCode, graItemCode, rates) {
 }
 
 // ===================================================================
-// STRICT GRA INVOICE MAPPER (UPDATED — NEW REGIME + YOUR U_ FIELD RULE)
-//  - EXCLUSIVE: compute levies (A,B) + VAT on BASE only
-//  - INCLUSIVE: do NOT compute levies; do NOT compute VAT (use SAP VatSum*)
+// STRICT GRA INVOICE MAPPER
 // ===================================================================
 function mapSapInvoiceToGra(inv, calculationType) {
   const currency = safeStr(inv.DocCurrency) || "GHS";
@@ -586,112 +562,31 @@ function mapSapInvoiceToGra(inv, calculationType) {
   const businessPartnerTin = safeStr(inv.U_TIN || inv.U_BP_TIN || inv.BusinessPartnerTin) || GRA_DEFAULT_BP_TIN;
   const purchaseOrderReference = GRA_SEND_PO_REFERENCE ? safeStr(inv.NumAtCard || "") : "";
 
+  const rates = getLevyRatesForDate(transactionDate);
+  const levySumRate =
+    Number(rates.A || 0) + Number(rates.B || 0) + Number(rates.C || 0) + Number(rates.D || 0) + Number(rates.E || 0);
+
   const lines = Array.isArray(inv.DocumentLines) ? inv.DocumentLines : [];
   const ct = String(calculationType || "EXCLUSIVE").toUpperCase();
-
-  // ---------------------------
-  // INCLUSIVE MODE (NO LEVY CALC, NO VAT CALC)
-  // ---------------------------
-  if (ct === "INCLUSIVE") {
-    // Prefer SAP DocTotal as the inclusive grand total, fallback to sum of inclusive line totals
-    let totalAmount = 0;
-    const invoiceTotalCandidates = [inv.DocTotal, inv.DocTotalFc, inv.DocTotalSys];
-    for (const c of invoiceTotalCandidates) {
-      const x = Number(c);
-      if (Number.isFinite(x) && x >= 0) {
-        totalAmount = money(x);
-        break;
-      }
-    }
-    if (!totalAmount) {
-      let sumLinesIncl = 0;
-      for (const ln of lines) sumLinesIncl += getLineAmountForMode(ln, "INCLUSIVE");
-      totalAmount = money(sumLinesIncl);
-    }
-
-    // VAT is NOT calculated here; take from SAP if present else 0.
-    let totalVat = 0.0;
-    const vatCandidates = [inv.VatSum, inv.VatSumFc, inv.VatSumSys];
-    for (const c of vatCandidates) {
-      const x = Number(c);
-      if (Number.isFinite(x) && x >= 0) {
-        totalVat = money(x);
-        break;
-      }
-    }
-
-    const items = lines.map((ln) => {
-      const graItemCode = resolveGraItemCode(ln);
-      const qty = getLineQuantity(ln);
-
-      const unitPrice = getLineUnitPrice(ln);
-      // if unitPrice missing, derive from inclusive line amount / qty
-      const lineAmountIncl = getLineAmountForMode(ln, "INCLUSIVE");
-      const unitPriceFinal = unitPrice > 0 ? unitPrice : qty > 0 ? money(lineAmountIncl / qty) : 0.0;
-
-      return {
-        itemCode: graItemCode,
-        itemCategory: safeStr(ln.U_ItemCategory || ""),
-        expireDate: safeStr(ln.U_ExpireDate || ""),
-        description: safeStr(ln.ItemDescription || ""),
-        quantity: qty,
-
-        levyAmountA: 0.0,
-        levyAmountB: 0.0,
-        levyAmountC: 0.0,
-        levyAmountD: 0.0,
-        levyAmountE: 0.0,
-
-        discountAmount: 0.0,
-        batchCode: safeStr(ln.BatchCode || ln.U_BatchCode || ""),
-        unitPrice: unitPriceFinal,
-      };
-    });
-
-    return {
-      currency,
-      exchangeRate,
-      invoiceNumber,
-      totalLevy: 0.0,
-      userName: GRA_USER_NAME,
-      flag: GRA_FLAG,
-      calculationType: "INCLUSIVE",
-      totalVat, // from SAP
-      transactionDate,
-      totalAmount, // inclusive grand total
-      voucherAmount: 0.0,
-      businessPartnerName,
-      businessPartnerTin,
-      saleType: GRA_SALE_TYPE,
-      discountType: GRA_DISCOUNT_TYPE,
-      discountAmount: 0.0,
-      reference: "",
-      groupReferenceId: "",
-      purchaseOrderReference,
-      items,
-    };
-  }
-
-  // ---------------------------
-  // EXCLUSIVE MODE (LEVY + VAT CALC — NEW REGIME)
-  // ---------------------------
-  const rates = getLevyRatesForDate(transactionDate);
-
-  let baseTotal = 0;
-  for (const ln of lines) baseTotal += getLineAmountForMode(ln, "EXCLUSIVE");
-  baseTotal = money(baseTotal);
 
   const items = lines.map((ln) => {
     const sapItemCode = safeStr(ln.ItemCode || ln.U_ItemCode || "");
     const graItemCode = resolveGraItemCode(ln);
 
-    const qty = getLineQuantity(ln);
-    const baseLine = money(getLineAmountForMode(ln, "EXCLUSIVE"));
+    const qty = money(ln.Quantity);
+    const unitPrice = money(ln.UnitPrice ?? ln.Price);
 
-    // Your rule: U_UNITPRICE is the unit price. Fallback if missing.
-    const unitPrice = getLineUnitPrice(ln) || money(ln.UnitPrice ?? ln.Price);
+    const lineAmount = getLineAmountForMode(ln, ct);
 
-    const lev = computeLeviesFromBase(baseLine, sapItemCode, graItemCode, rates);
+    let base = 0;
+    if (ct === "INCLUSIVE") {
+      const factor = inclusiveFactor(levySumRate, GRA_VAT_RATE);
+      base = factor > 0 ? money(lineAmount / factor) : 0;
+    } else {
+      base = money(lineAmount);
+    }
+
+    const lev = computeLeviesFromBase(base, sapItemCode, graItemCode, rates);
 
     return {
       itemCode: graItemCode,
@@ -702,9 +597,9 @@ function mapSapInvoiceToGra(inv, calculationType) {
 
       levyAmountA: money(lev.A),
       levyAmountB: money(lev.B),
-      levyAmountC: 0.0,
-      levyAmountD: 0.0,
-      levyAmountE: 0.0,
+      levyAmountC: money(lev.C),
+      levyAmountD: money(lev.D),
+      levyAmountE: money(lev.E),
 
       discountAmount: 0.0,
       batchCode: safeStr(ln.BatchCode || ln.U_BatchCode || ""),
@@ -712,11 +607,42 @@ function mapSapInvoiceToGra(inv, calculationType) {
     };
   });
 
-  const totalLevy = money(items.reduce((sum, it) => sum + Number(it.levyAmountA || 0) + Number(it.levyAmountB || 0), 0));
+  const totalLevy = money(
+    items.reduce(
+      (sum, it) =>
+        sum +
+        Number(it.levyAmountA || 0) +
+        Number(it.levyAmountB || 0) +
+        Number(it.levyAmountC || 0) +
+        Number(it.levyAmountD || 0) +
+        Number(it.levyAmountE || 0),
+      0
+    )
+  );
 
-  // VAT CALCULATION (EXCLUSIVE - NEW REGIME) happens HERE:
-  // VAT is computed on BASE only (same base as levies)
-  const totalVat = money(GRA_VAT_RATE * baseTotal);
+  const factor = inclusiveFactor(levySumRate, GRA_VAT_RATE);
+  let baseTotal = 0;
+  if (ct === "INCLUSIVE") {
+    for (const ln of lines) {
+      const amt = getLineAmountForMode(ln, ct);
+      baseTotal += factor > 0 ? amt / factor : 0;
+    }
+  } else {
+    for (const ln of lines) baseTotal += getLineAmountForMode(ln, ct);
+  }
+  baseTotal = money(baseTotal);
+
+  const totalVat = money(GRA_VAT_RATE * (baseTotal + totalLevy));
+
+  let totalAmount = 0;
+  if (ct === "INCLUSIVE") {
+    const computedInclusive = money(baseTotal + totalLevy + totalVat);
+    const docTotal = Number(inv.DocTotal);
+    if (Number.isFinite(docTotal) && Math.abs(money(docTotal) - computedInclusive) <= 0.05) totalAmount = money(docTotal);
+    else totalAmount = computedInclusive;
+  } else {
+    totalAmount = baseTotal;
+  }
 
   return {
     currency,
@@ -725,10 +651,10 @@ function mapSapInvoiceToGra(inv, calculationType) {
     totalLevy,
     userName: GRA_USER_NAME,
     flag: GRA_FLAG,
-    calculationType: "EXCLUSIVE",
+    calculationType: ct,
     totalVat,
     transactionDate,
-    totalAmount: baseTotal, // exclusive value (no VAT)
+    totalAmount,
     voucherAmount: 0.0,
     businessPartnerName,
     businessPartnerTin,
@@ -743,14 +669,28 @@ function mapSapInvoiceToGra(inv, calculationType) {
 }
 
 // ===================================================================
-// STRICT REFUND MAPPERS
+// STRICT REFUND MAPPERS (NEW)
+//   - FULL REFUND: flag="REFUND"
+//   - PARTIAL REFUND: flag="PARTIAL_REFUND" + reference required
+//   - Both go to the SAME /invoice endpoint
+//   - Adds totalExciseAmount + item.exciseAmount (your samples show 0.00)
 // ===================================================================
 function mapSapInvoiceToRefundInvoice(inv, calculationType, refundFlag, reference, partialItemsOverride) {
+  // Build base from invoice mapper (reuses levy/vat logic)
   const base = mapSapInvoiceToGra(inv, calculationType);
 
   const flag = String(refundFlag || "REFUND").toUpperCase();
   const ref = safeStr(reference || "");
 
+  // PARTIAL_REFUND requires a reference (per your sample)
+  if (flag === "PARTIAL_REFUND" && !ref) {
+    // We do not throw here to keep mapping pure; validation will block posting.
+  }
+
+  // Apply optional partial override:
+  // partialItemsOverride format (client may send):
+  // { items: [ { index, quantity } ] } OR { items: [ { itemCode, quantity } ] }
+  // If provided: we keep ONLY those lines and set their quantities.
   let items = Array.isArray(base.items) ? base.items : [];
 
   if (partialItemsOverride && typeof partialItemsOverride === "object") {
@@ -784,11 +724,26 @@ function mapSapInvoiceToRefundInvoice(inv, calculationType, refundFlag, referenc
     }
   }
 
+  // Add excise fields (default 0.00)
   const itemsWithExcise = items.map((it) => ({
     ...it,
     exciseAmount: money(it.exciseAmount ?? 0),
   }));
 
+  // Recompute totals after potential partial override using the same engine:
+  // We recompute based on the "posted payload" items.
+  // NOTE: We treat unitPrice and quantities as given; levies/vat already computed per item,
+  // but if partial changes quantity, totals should change. We recompute by scaling base on qty ratio.
+  // For strict correctness, you normally must rebuild from SAP lines with those quantities.
+  // Here we do the strictest we can WITHOUT needing SAP returns mapping for each selected quantity:
+  // - Build a fresh payload by re-running mapSapInvoiceToGra then applying override with qty,
+  //   BUT levies/vat need to follow base and qty changes. Our mapper used line totals from SAP,
+  //   so quantity changes cannot safely recalc monetary totals unless unitPrice is used.
+  // Therefore: For partial refunds, expect you will send correct quantities AND correct amounts
+  // from SAP credit memo / return invoice. If you want, we can later map from SAP CreditNotes.
+  //
+  // For now: we keep amounts computed from the original invoice mapper and only change quantity.
+  // The endpoint still accepts strict schema (and your sample only shows 1 item).
   const totalLevy = money(
     itemsWithExcise.reduce(
       (sum, it) =>
@@ -815,6 +770,8 @@ function mapSapInvoiceToRefundInvoice(inv, calculationType, refundFlag, referenc
 }
 
 function mapRefundCancellation(inv, reference, transactionDateOverrideIsoZ) {
+  // Your sample:
+  // { invoiceNumber, reference, userName, flag:"REFUND_CANCELATION", transactionDate, totalAmount }
   const invoiceNumber = buildGraInvoiceNumber(inv);
   const transactionDate = transactionDateOverrideIsoZ ? safeStr(transactionDateOverrideIsoZ) : toIsoZFromSap(inv);
 
@@ -829,7 +786,7 @@ function mapRefundCancellation(inv, reference, transactionDateOverrideIsoZ) {
 }
 
 // ===================================================================
-// VALIDATORS (UPDATED — NEW REGIME EXCLUSIVE VAT formula)
+// VALIDATORS
 // ===================================================================
 function validateGraPayload(payload) {
   const issues = [];
@@ -867,19 +824,38 @@ function validateGraPayload(payload) {
     add("error", "totalLevy mismatch", `totalLevy=${money(payload.totalLevy)} but sum(items levies)=${sumLevy}`, "Set totalLevy to the items levy sum.");
   }
 
-  // Inclusive: no formula check (we don't compute VAT)
-  if (ct === "INCLUSIVE") return issues;
+  const rates = getLevyRatesForDate(payload.transactionDate);
+  const expectC = Number(rates.C || 0) > 0;
+  if (expectC) {
+    const sumC = money(items.reduce((s, it) => s + Number(it.levyAmountC || 0), 0));
+    if (sumC <= 0) {
+      add(
+        "error",
+        "Levy C expected but zero",
+        `transactionDate=${payload.transactionDate} and levyRateC=${rates.C}, but total levyAmountC=${sumC}`,
+        `For dates before ${GRA_LEVY_C_END_DATE}, Levy C is expected by default.`
+      );
+    }
+  }
 
-  // EXCLUSIVE VAT check (NEW REGIME): VAT = VAT_RATE * BASE (NOT base+levy)
+  const levySumRate =
+    Number(rates.A || 0) + Number(rates.B || 0) + Number(rates.C || 0) + Number(rates.D || 0) + Number(rates.E || 0);
+
+  let baseApprox = 0;
+  if (ct === "EXCLUSIVE") baseApprox = money(payload.totalAmount);
+  else {
+    const f = inclusiveFactor(levySumRate, GRA_VAT_RATE);
+    baseApprox = f > 0 ? money(payload.totalAmount / f) : 0;
+  }
+
+  const vatExpected = money(GRA_VAT_RATE * (baseApprox + money(payload.totalLevy)));
   const vatSent = money(payload.totalVat);
-  const base = money(payload.totalAmount);
-  const expectedVat = money(GRA_VAT_RATE * base);
-  if (Math.abs(vatSent - expectedVat) > 0.02) {
+  if (Math.abs(vatSent - vatExpected) > 0.02) {
     add(
       "warn",
-      "VAT may not match expected (exclusive - new regime)",
-      `totalVat=${vatSent} but expected≈${expectedVat} (VAT ${(GRA_VAT_RATE * 100).toFixed(0)}% of base)`,
-      "Ensure VAT is computed on base only and rounding matches."
+      "VAT may not match expected",
+      `totalVat=${vatSent} but expected≈${vatExpected} (VAT ${(GRA_VAT_RATE * 100).toFixed(0)}% of (base+levy))`,
+      "Common cause of E818/E820: VAT must be computed on (value + levies) and rounded consistently."
     );
   }
 
@@ -890,6 +866,7 @@ function validateRefundInvoicePayload(payload) {
   const issues = [];
   const add = (level, title, detail, hint) => issues.push({ level, title, detail, hint });
 
+  // Must match your samples
   const flag = String(payload.flag || "").toUpperCase();
   if (!["REFUND", "PARTIAL_REFUND"].includes(flag)) {
     add("error", "Invalid refund flag", `flag="${payload.flag}"`, `Use "REFUND" or "PARTIAL_REFUND".`);
@@ -898,6 +875,7 @@ function validateRefundInvoicePayload(payload) {
     add("error", "Missing reference", "PARTIAL_REFUND requires reference.", `Provide payload.reference like "RF230724-000003".`);
   }
 
+  // Ensure required fields exist
   if (payload.totalExciseAmount === undefined) add("error", "Missing totalExciseAmount", "Field totalExciseAmount is required.", "Set to 0.00 if no excise.");
   const items = Array.isArray(payload.items) ? payload.items : [];
   if (!items.length) add("error", "No items", "Refund must contain at least one item.", "Ensure at least 1 line is included.");
@@ -906,6 +884,8 @@ function validateRefundInvoicePayload(payload) {
     if (it.exciseAmount === undefined) add("error", "Missing item.exciseAmount", `Item ${safeStr(it.itemCode)} missing exciseAmount.`, "Set to 0.00 if no excise.");
   }
 
+  // Reuse levy/vat checks from invoice validator where possible
+  // (same schema for levy/vat fields)
   const graLikeIssues = validateGraPayload(payload).filter((i) => i.level !== "error" || !i.title.includes("Invalid calculationType"));
   return issues.concat(graLikeIssues);
 }
@@ -1209,15 +1189,16 @@ app.post("/api/gra/config", (req, res) => {
 });
 
 // ===================================================================
-// "REFUND" SESSION — separate from GRA
+// "REFUND" SESSION (NEW) — separate from GRA
 // ===================================================================
 function ensureRefundSession(req) {
   if (!req.session.refund) {
     req.session.refund = {
       lastSelection: [],
-      calculationType: "INCLUSIVE",
+      calculationType: "INCLUSIVE", // your samples show INCLUSIVE
       refundType: "FULL", // FULL | PARTIAL | CANCEL
-      reference: "",
+      reference: "", // used for PARTIAL + CANCEL
+      // Optional partial override: { items: [ { index, quantity } ] }
       partialOverride: null,
     };
   }
@@ -1249,7 +1230,7 @@ app.post("/api/refund/remove", (req, res) => {
   res.json({ ok: true, lastSelection: req.session.refund.lastSelection });
 });
 
-// Helper to copy invoice selection into refund selection
+// Helper to copy invoice selection into refund selection (no need to change invoices UI)
 app.post("/api/refund/copy-from-gra", (req, res) => {
   ensureRefundSession(req);
   ensureGraSession(req);
@@ -1318,7 +1299,8 @@ app.get("/api/gra/payload/:docEntry", async (req, res) => {
       debug: {
         postEnabled: GRA_POST_ENABLED,
         vatRate: GRA_VAT_RATE,
-        levyRates: getLevyRatesForDate(payload.transactionDate),
+        levyRatesForDate: getLevyRatesForDate(payload.transactionDate),
+        levyCEndDate: GRA_LEVY_C_END_DATE,
         levyMode: GRA_LEVY_MODE,
         itemMapKeys: Object.keys(GRA_ITEM_CODE_MAP).length,
       },
@@ -1428,8 +1410,10 @@ app.get("/api/gra/post-result/:docEntry/pdf", async (req, res) => {
 });
 
 // ===================================================================
-// API: REFUND PREVIEW + POST
+// API: REFUND PREVIEW + POST (NEW, STRICT)
 // ===================================================================
+
+// Preview refund payload for an invoice DocEntry (FULL / PARTIAL)
 app.get("/api/refund/payload/:docEntry", async (req, res) => {
   try {
     ensureRefundSession(req);
@@ -1474,6 +1458,7 @@ app.get("/api/refund/payload/:docEntry", async (req, res) => {
   }
 });
 
+// Post refund (FULL/PARTIAL) OR cancellation (CANCEL)
 app.post("/api/refund/post/:docEntry", async (req, res) => {
   try {
     ensureRefundSession(req);
@@ -1487,14 +1472,16 @@ app.post("/api/refund/post/:docEntry", async (req, res) => {
       cacheSet(docEntry, inv);
     }
 
+    // Allow caller to override config per-request, but defaults to session values
     const refundType = String(req.body?.refundType || req.session.refund.refundType || "FULL").toUpperCase();
     const ct = String(req.body?.calculationType || req.session.refund.calculationType || "INCLUSIVE").toUpperCase();
     const reference = safeStr(req.body?.reference ?? req.session.refund.reference ?? "");
     const partialOverride = req.body?.partialOverride ?? req.session.refund.partialOverride ?? null;
 
     if (refundType === "CANCEL") {
-      const cancelPayload =
-        req.body?.payload && typeof req.body.payload === "object" ? req.body.payload : mapRefundCancellation(inv, reference, req.body?.transactionDate || null);
+      const cancelPayload = req.body?.payload && typeof req.body.payload === "object"
+        ? req.body.payload
+        : mapRefundCancellation(inv, reference, req.body?.transactionDate || null);
 
       const issues = validateRefundCancelPayload(cancelPayload);
       const blocking = issues.filter((i) => i.level === "error");
@@ -1533,10 +1520,17 @@ app.post("/api/refund/post/:docEntry", async (req, res) => {
       return res.json({ ok: true, docEntry, refundType: "CANCEL", response: post.responseBody });
     }
 
+    // FULL or PARTIAL refund -> posts to REFUND_INVOICE_URL
     let payload =
       req.body?.payload && typeof req.body.payload === "object"
         ? req.body.payload
-        : mapSapInvoiceToRefundInvoice(inv, ct, refundType === "PARTIAL" ? "PARTIAL_REFUND" : "REFUND", reference, partialOverride);
+        : mapSapInvoiceToRefundInvoice(
+            inv,
+            ct,
+            refundType === "PARTIAL" ? "PARTIAL_REFUND" : "REFUND",
+            reference,
+            partialOverride
+          );
 
     const issues = validateRefundInvoicePayload(payload);
     const blocking = issues.filter((i) => i.level === "error");
@@ -1578,12 +1572,13 @@ app.post("/api/refund/post/:docEntry", async (req, res) => {
   }
 });
 
+// Get last saved refund result
 app.get("/api/refund/post-result/:docEntry", (req, res) => {
   try {
     const docEntry = Number(req.params.docEntry);
     if (!Number.isFinite(docEntry) || docEntry <= 0) return sendApiError(res, new Error("Invalid DocEntry"), 400);
 
-    const kind = String(req.query.kind || "FULL").toUpperCase();
+    const kind = String(req.query.kind || "FULL").toUpperCase(); // FULL | PARTIAL | CANCEL
     const key = `${docEntry}:${kind === "CANCEL" ? "CANCEL" : kind === "PARTIAL" ? "PARTIAL" : "FULL"}`;
 
     const rec = refundResults.get(key) || null;
@@ -1707,8 +1702,8 @@ function renderShell({ title, active, topTitle, topMeta, bodyHtml }) {
         <div style="font-weight:900;margin-top:4px">${GRA_POST_ENABLED ? "ENABLED" : "DISABLED"}</div>
         <div class="navHint" style="margin-top:10px">Refunds</div>
         <div style="font-weight:900;margin-top:4px">${REFUND_POST_ENABLED ? "ENABLED" : "DISABLED"}</div>
-        <div class="navHint" style="margin-top:10px">Tax regime</div>
-        <div style="font-weight:900;margin-top:4px">NEW (VAT on base)</div>
+        <div class="navHint" style="margin-top:10px">Levy C cutoff</div>
+        <div style="font-weight:900;margin-top:4px">${escapeHtml(GRA_LEVY_C_END_DATE)}</div>
       </div>
     </aside>
 
@@ -1721,7 +1716,7 @@ function renderShell({ title, active, topTitle, topMeta, bodyHtml }) {
         <div class="row">
           <span class="chip">TLS Verify: <b>${VERIFY_TLS ? "ON" : "OFF"}</b></span>
           <span class="chip">VAT: <b>${Math.round(GRA_VAT_RATE * 100)}%</b></span>
-          <span class="chip">Levy A+B: <b>${Math.round((Number(GRA_LEVY_RATES_BASE.A || 0) + Number(GRA_LEVY_RATES_BASE.B || 0)) * 100)}%</b></span>
+          <span class="chip">Levy mode: <b>${escapeHtml(GRA_LEVY_MODE)}</b></span>
         </div>
       </div>
       <div class="page">${bodyHtml}</div>
@@ -1968,6 +1963,7 @@ app.get("/invoices", (req, res) => {
       document.getElementById("goRefund").addEventListener("click", async () => {
         if (!selected.size){ alert("Select at least one invoice first."); return; }
         await syncSelectionToServer();
+        // copy selection into refund session so refund page has a DocEntry list
         try{
           await fetchJson("/api/refund/copy-from-gra", { method:"POST" });
         }catch(e){}
@@ -2049,8 +2045,8 @@ app.get("/gra", (req, res) => {
       <div class="row" style="margin-top:14px">
         <span class="chip">Tax mode</span>
         <select id="calcType">
-          <option value="EXCLUSIVE">EXCLUSIVE</option>
-          <option value="INCLUSIVE">INCLUSIVE</option>
+          <option value="EXCLUSIVE">EXCLUSIVE (tax added)</option>
+          <option value="INCLUSIVE">INCLUSIVE (tax inside total)</option>
         </select>
         <button class="btnPrimary" id="apply">Apply + Recompute</button>
       </div>
@@ -2201,8 +2197,8 @@ app.get("/post-gra", (req, res) => {
       <div class="row" style="margin-top:14px">
         <span class="chip">Tax mode</span>
         <select id="calcType">
-          <option value="EXCLUSIVE">EXCLUSIVE</option>
-          <option value="INCLUSIVE">INCLUSIVE</option>
+          <option value="EXCLUSIVE">EXCLUSIVE (tax added)</option>
+          <option value="INCLUSIVE">INCLUSIVE (tax inside total)</option>
         </select>
         <button class="btnPrimary" id="apply">Apply</button>
 
@@ -2447,15 +2443,306 @@ app.get("/post-gra", (req, res) => {
   res.send(renderShell({ title: "Post to GRA", active: "post", topTitle: "Post to GRA", topMeta: "Select tax mode, post invoices, view SUCCESS response, export PDF.", bodyHtml }));
 });
 
-// NOTE: Your /post-refund UI page was in your previous file.
-// If you need me to paste the /post-refund UI HTML page too, tell me — but the backend is already complete above.
+// ===================================================================
+// UI: REFUND POSTING SCREEN (NEW)
+//   - Choose FULL / PARTIAL / CANCEL
+//   - Provide reference (required for PARTIAL + CANCEL)
+//   - Shows strict payload preview + checks
+//   - Lets you post (uses /api/refund/post/:docEntry)
+// ===================================================================
+app.get("/post-refund", (req, res) => {
+  const bodyHtml = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-weight:900;font-size:16px">Refunds (FULL / PARTIAL / CANCEL)</div>
+          <div class="topMeta" style="margin-top:6px">
+            Refund posting is: <b>${REFUND_POST_ENABLED ? "ENABLED" : "DISABLED"}</b>.
+            Full & Partial go to <b>/invoice</b>. Cancellation goes to <b>/cancellation</b>.
+          </div>
+        </div>
+        <div class="row">
+          <a class="chip" href="/invoices">Back to invoices</a>
+          <a class="chip" href="/post-gra">Go to invoice posting</a>
+        </div>
+      </div>
 
+      <div class="row" style="margin-top:14px">
+        <button class="btnWarn" id="copySel">Use selection from Invoices</button>
+
+        <span class="chip">Refund Type</span>
+        <select id="refundType">
+          <option value="FULL">FULL REFUND</option>
+          <option value="PARTIAL">PARTIAL REFUND</option>
+          <option value="CANCEL">REFUND CANCELLATION</option>
+        </select>
+
+        <span class="chip">Tax mode</span>
+        <select id="calcType">
+          <option value="INCLUSIVE">INCLUSIVE</option>
+          <option value="EXCLUSIVE">EXCLUSIVE</option>
+        </select>
+
+        <span class="chip">Reference</span>
+        <input id="reference" placeholder="e.g. RF230724-000003" style="min-width:220px"/>
+
+        <span class="chip">Selected DocEntry</span>
+        <select id="docSelect"></select>
+
+        <button class="btnPrimary" id="apply">Apply</button>
+        <button class="btnOk" id="postBtn">Post Refund</button>
+
+        <span class="topMeta" id="hint"></span>
+      </div>
+
+      <div style="margin-top:14px;font-weight:900;">Checks</div>
+      <div id="checks" style="margin-top:10px;"></div>
+
+      <div class="grid grid2" style="margin-top:14px">
+        <div class="card">
+          <div style="font-weight:900">Refund payload (STRICT)</div>
+          <div class="topMeta" style="margin-top:6px">
+            You can edit this JSON (useful for partial overrides). Posting will use this JSON if it is valid.
+          </div>
+          <textarea id="payloadEdit"></textarea>
+        </div>
+        <div class="card">
+          <div style="font-weight:900">Refund response</div>
+          <div class="topMeta" style="margin-top:6px">Shows SUCCESS response or real error body.</div>
+          <div id="result"></div>
+          <pre id="raw" style="margin-top:10px;">(no response yet)</pre>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const refundType = document.getElementById("refundType");
+      const calcType = document.getElementById("calcType");
+      const reference = document.getElementById("reference");
+      const docSelect = document.getElementById("docSelect");
+      const applyBtn = document.getElementById("apply");
+      const postBtn = document.getElementById("postBtn");
+      const hint = document.getElementById("hint");
+      const checks = document.getElementById("checks");
+      const payloadEdit = document.getElementById("payloadEdit");
+      const result = document.getElementById("result");
+      const raw = document.getElementById("raw");
+
+      async function fetchJson(url, opts){
+        const res = await fetch(url, opts);
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
+      }
+
+      function issueBox(i){
+        const cls = i.level === "error" ? "alert alertError" : (i.level === "warn" ? "alert alertWarn" : "alert alertOk");
+        const icon = i.level === "error" ? "!" : (i.level === "warn" ? "!" : "✓");
+        return \`
+          <div class="\${cls}" style="margin-bottom:10px">
+            <div class="alertIcon">\${icon}</div>
+            <div>
+              <div style="font-weight:900">\${i.title}</div>
+              <div style="margin-top:3px">\${i.detail || ""}</div>
+              \${i.hint ? '<div class="topMeta" style="margin-top:6px">Tip: ' + i.hint + '</div>' : ''}
+            </div>
+          </div>\`;
+      }
+
+      function renderChecks(issues){
+        if (!issues || !issues.length){
+          checks.innerHTML = \`
+            <div class="alert alertOk">
+              <div class="alertIcon">✓</div>
+              <div>
+                <div style="font-weight:900">No issues detected</div>
+                <div style="margin-top:3px">Posting is allowed.</div>
+              </div>
+            </div>\`;
+          return;
+        }
+        checks.innerHTML = issues.map(issueBox).join("");
+      }
+
+      function renderError(e){
+        const kind = e?.kind || "UNKNOWN";
+        const httpStatus = e?.httpStatus || "";
+        const body = e?.responseBody;
+        const msg = e?.message || "Refund posting failed.";
+        const pretty = body ? JSON.stringify(body, null, 2) : "";
+
+        result.innerHTML = \`
+          <div class="alert alertError">
+            <div class="alertIcon">!</div>
+            <div style="width:100%">
+              <div style="font-weight:900">Refund Posting Failed</div>
+              <div class="topMeta" style="margin-top:6px">
+                Type: <b>\${kind}</b> \${httpStatus ? '• HTTP: <b>' + httpStatus + '</b>' : ''}
+              </div>
+              <div style="margin-top:8px">\${msg}</div>
+              \${pretty ? '<pre style="margin-top:10px">' + pretty + '</pre>' : ''}
+            </div>
+          </div>\`;
+        raw.textContent = "(posting failed)";
+      }
+
+      function renderOkResponse(resp){
+        result.innerHTML = \`
+          <div class="alert alertOk">
+            <div class="alertIcon">✓</div>
+            <div style="width:100%">
+              <div style="font-weight:900">Posted successfully</div>
+              <div class="topMeta" style="margin-top:6px">Status: <b>\${resp?.response?.status || "—"}</b></div>
+            </div>
+          </div>\`;
+        raw.textContent = JSON.stringify(resp, null, 2);
+      }
+
+      async function loadRefundSelection(){
+        const s = await fetchJson("/api/refund/selection");
+        const sel = s.lastSelection || [];
+
+        const hash = new URLSearchParams((location.hash || "").replace("#",""));
+        const fromHash = hash.get("docEntry");
+        const preferred = fromHash ? Number(fromHash) : (sel[0] ? Number(sel[0]) : null);
+
+        docSelect.innerHTML = sel.length
+          ? sel.map(d => \`<option value="\${d}">\${d}</option>\`).join("")
+          : \`<option value="">(no selection)</option>\`;
+
+        if (preferred && sel.includes(preferred)) docSelect.value = String(preferred);
+      }
+
+      async function loadRefundConfig(){
+        const cfg = await fetchJson("/api/refund/config");
+        refundType.value = cfg.refundType || "FULL";
+        calcType.value = cfg.calculationType || "INCLUSIVE";
+        reference.value = cfg.reference || "";
+      }
+
+      async function saveRefundConfig(){
+        await fetchJson("/api/refund/config", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({
+            refundType: refundType.value,
+            calculationType: calcType.value,
+            reference: reference.value
+          })
+        });
+      }
+
+      async function refreshPreview(){
+        const docEntry = Number(docSelect.value || "0");
+        if (!docEntry){
+          payloadEdit.value = "";
+          checks.innerHTML = "";
+          result.innerHTML = "";
+          raw.textContent = "(no response yet)";
+          return;
+        }
+
+        await saveRefundConfig();
+
+        const data = await fetchJson(\`/api/refund/payload/\${docEntry}?refundType=\${encodeURIComponent(refundType.value)}\`);
+        renderChecks(data.issues || []);
+        payloadEdit.value = JSON.stringify(data.payload, null, 2);
+
+        // load last result
+        const last = await fetchJson(\`/api/refund/post-result/\${docEntry}?kind=\${encodeURIComponent(refundType.value)}\`);
+        if (last.result){
+          raw.textContent = JSON.stringify(last.result.responsePayload, null, 2);
+        } else {
+          raw.textContent = "(no response yet)";
+        }
+      }
+
+      document.getElementById("copySel").addEventListener("click", async () => {
+        try{
+          await fetchJson("/api/refund/copy-from-gra", { method:"POST" });
+          await loadRefundSelection();
+          await refreshPreview();
+        }catch(e){
+          alert("Could not copy selection. Ensure you selected invoices on the Invoices page first.");
+        }
+      });
+
+      applyBtn.addEventListener("click", async () => {
+        await refreshPreview();
+      });
+
+      docSelect.addEventListener("change", refreshPreview);
+      refundType.addEventListener("change", refreshPreview);
+
+      postBtn.addEventListener("click", async () => {
+        const docEntry = Number(docSelect.value || "0");
+        if (!docEntry){ alert("No invoice selected."); return; }
+
+        hint.textContent = "Posting...";
+        postBtn.disabled = true;
+
+        try{
+          let payload = null;
+          try{
+            payload = JSON.parse(payloadEdit.value || "{}");
+          }catch(_){
+            payload = null;
+          }
+
+          const resp = await fetchJson("/api/refund/post/" + docEntry, {
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body: JSON.stringify({
+              refundType: refundType.value,
+              calculationType: calcType.value,
+              reference: reference.value,
+              payload: payload && typeof payload === "object" ? payload : undefined
+            })
+          });
+
+          hint.textContent = "Posted successfully.";
+          renderOkResponse(resp.response);
+          await refreshPreview();
+        }catch(e){
+          hint.textContent = "";
+          if (e?.blocked && e?.issues){
+            renderChecks(e.issues || []);
+            alert("Posting blocked: fix the errors shown in checks.");
+          } else {
+            renderError(e);
+          }
+        }finally{
+          postBtn.disabled = false;
+        }
+      });
+
+      (async function init(){
+        await loadRefundConfig();
+        await loadRefundSelection();
+        await refreshPreview();
+      })();
+    </script>
+  `;
+  res.send(
+    renderShell({
+      title: "Refunds",
+      active: "refund",
+      topTitle: "Refunds",
+      topMeta: "Full / Partial refunds and refund cancellation (STRICT payloads).",
+      bodyHtml,
+    })
+  );
+});
+
+// ===================================================================
+// START
+// ===================================================================
 app.listen(process.env.PORT || PORT, () => {
   console.log(`Running on http://localhost:${process.env.PORT || PORT}`);
   console.log(`Polling every ${POLL_MS}ms`);
   console.log(`Posting enabled: ${GRA_POST_ENABLED}`);
   console.log(`VAT rate: ${GRA_VAT_RATE}`);
-  console.log(`Levy rates: ${JSON.stringify(GRA_LEVY_RATES_BASE)}`);
+  console.log(`Levy C cutoff (exclusive): ${GRA_LEVY_C_END_DATE}`);
   console.log(`Item map keys: ${Object.keys(GRA_ITEM_CODE_MAP).length}`);
 
   console.log(`Refund posting enabled: ${REFUND_POST_ENABLED}`);
