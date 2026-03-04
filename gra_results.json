@@ -119,6 +119,201 @@
       }
     }
   },
+  "20414": {
+    "savedAt": "2026-03-04T10:55:41.841Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0339",
+      "totalLevy": 18.76,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 56.25,
+      "transactionDate": "2026-01-22T16:26:00Z",
+      "totalAmount": 375,
+      "voucherAmount": 0,
+      "businessPartnerName": "KOJO MARFO",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "100021",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "MC-Powerflow 2695",
+          "quantity": 20,
+          "levyAmountA": 9.38,
+          "levyAmountB": 9.38,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 18.75
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0339",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS30",
+          "ysdcintdata": "AHV2-7EZB-ZOWB-BHVE-3FEW-N55S-JE",
+          "ysdcregsig": "K64W-TZWO-JSEC-JAOK",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 10:56:33",
+          "ysdctime": "2026/03/04 10:56:33",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=nCmAgix63pQSdMVDRVA6GOp0U3adZ74rRH3DK1ys7P3/x22hENbPXk1NnQ9SplozB4atDkhI9AcgL3PVvgHGVSkmGYJv7aNvitXKKtLzrxRnM0IDf1T1qzGs/XxYQVa9z3RbK1i4Ivr291Fuv06WT/m1+tQIuKIjOgJGQAXkzA0CMIGwMwjk45eoLZGvjBosaqoD/IsuiJ2m7yWA8tXl/hAIwvw+9oPuGcusUsU8b4CrVq8/8lnyWA0s60A6L6q/GD+vaNZvFk4WZ0MoRUEaYZ42Npqiny+UGisHrUoEH94=&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
+  "20499": {
+    "savedAt": "2026-03-04T14:01:55.093Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0395",
+      "totalLevy": 451.26,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 1353.77,
+      "transactionDate": "2026-01-26T13:51:00Z",
+      "totalAmount": 9025.12,
+      "voucherAmount": 0,
+      "businessPartnerName": "LEAD THE WAY ENGINEERING",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "102311",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "MC-Proof DF 8_White",
+          "quantity": 240,
+          "levyAmountA": 204.6,
+          "levyAmountB": 204.6,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 34.1
+        },
+        {
+          "itemCode": "102246",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "MC-Proof 900",
+          "quantity": 56,
+          "levyAmountA": 21.03,
+          "levyAmountB": 21.03,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 15.02
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0395",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS59",
+          "ysdcintdata": "WAQQ-SLSK-JPDI-63TD-KYIS-BNAL-CE",
+          "ysdcregsig": "5TTM-ZFED-VDB4-NJQS",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 14:02:46",
+          "ysdctime": "2026/03/04 14:02:46",
+          "flag": "INVOICE",
+          "ysdcitems": "2"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=Tgwfru4p/COzuGWHqIam5bmcDDXzDanypaDenH3nls/kRhqx0IfkvUIreUEMASzgc2Yh0sZ5b0uneChsOmQml6LPealUbY64gy735vYihnIHYBxUi6g5qdHdQYtRzjTbcxwV0RWd4r26QfN9B3GXwOwTCkfrSeTiDHVO98jutY/znkIr2CtTouiNuLhsAljqn+azeGNmsvmHMcLBIKb5MCdHOBP8WmtRdqS9m4NpNqu1erDLLUmzMU0Y0Wqr7ROpI2+Ps+MBm7RedRlvRdIQKXDKoQABkY67N7elEoPRiO02ebfskg6oi83zWBJNQ+Ki&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
+  "20526": {
+    "savedAt": "2026-03-04T12:32:44.890Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0413",
+      "totalLevy": 43.3,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 129.87,
+      "transactionDate": "2026-01-27T09:27:00Z",
+      "totalAmount": 865.8,
+      "voucherAmount": 0,
+      "businessPartnerName": "Alex Koomson",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "100020",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "MC-Powerflow 5695",
+          "quantity": 60,
+          "levyAmountA": 21.65,
+          "levyAmountB": 21.65,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 14.43
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0413",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS39",
+          "ysdcintdata": "AL6T-3EKT-VZEZ-QOPX-4FLE-LSTM-C4",
+          "ysdcregsig": "DNZZ-KIOO-Q2EQ-EJVI",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 12:33:36",
+          "ysdctime": "2026/03/04 12:33:36",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=Tgwfru4p/COzuGWHqIam5TT1eqg+lSEuPUQQINjg51VZoR7buFChvnf4TJz0jvsDjAWOfS7URY7mXiEaxnjg+gVY2bbKJscDtZFezs/vD8ZoyazkxJu8ogDkqDoXHmJLSuzmXLcLgzEjHV2t+6xDS0gEEApeslEoXOpq7f/8u1Edvy7yh3aUwDqk8SGKxRnxVD2cZrQAEG7tcstQzWntMqXZZs2WftGnZ3TVDLtGIBSxnqGrTlrQzJO/yM/Y2Imh5aWjzbKRbGERXuheonFHZuFP7u3whsP2lt1y2sioLp3cRfPyDWdsi6MjAbQIs2Oo&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
   "20717": {
     "savedAt": "2026-03-04T08:59:28.504Z",
     "requestPayload": {

@@ -22,6 +22,12 @@
  *  - Strict payload includes: totalExciseAmount + item.exciseAmount
  *  - Uses SAME SECURITY_KEY header and key you provided
  *
+ * DATABASE (NEW):
+ *  - Stores SUCCESS signed invoices (GRA responses) into PostgreSQL (Render)
+ *  - Uses DATABASE_URL (Render internal connection string)
+ *  - Auto-creates table signed_invoices on startup
+ *  - Does NOT block posting if DB is down (logs + SSE warning)
+ *
  * ItemCode mapping SAP->GRA via env:
  *   GRA_ITEM_CODE_MAP_JSON={"ITM-00002":"TXC00389165855"}
  *
@@ -56,6 +62,10 @@
  *  - REFUND_CANCEL_URL=https://vsdcstaging.vat-gh.com/vsdc/api/v1/taxpayer/<TAXPAYER_CODE>/cancellation
  *  - REFUND_SECURITY_KEY=...  (your key)
  *  - REFUND_SECURITY_HEADER=SECURITY_KEY (optional, default SECURITY_KEY)
+ *
+ * Database ENV:
+ *  - DATABASE_URL=postgresql://...   (Render provides this)
+ *  - DB_ENABLED=true|false (optional; default true if DATABASE_URL is set)
  * -------------------------------------------------------------------
  */
 
@@ -68,6 +78,7 @@ const path = require("path");
 const session = require("express-session");
 const os = require("os");
 const { spawn } = require("child_process");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json({ limit: "3mb" }));
@@ -112,6 +123,26 @@ const REFUND_INVOICE_URL = process.env.REFUND_INVOICE_URL || ""; // .../taxpayer
 const REFUND_CANCEL_URL = process.env.REFUND_CANCEL_URL || ""; // .../taxpayer/<code>/cancellation
 const REFUND_SECURITY_HEADER = process.env.REFUND_SECURITY_HEADER || "SECURITY_KEY";
 const REFUND_SECURITY_KEY = process.env.REFUND_SECURITY_KEY || GRA_SECURITY_KEY || "";
+
+// ===================================================================
+// ENV (DATABASE - Render Postgres)
+// ===================================================================
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const DB_ENABLED =
+  String(process.env.DB_ENABLED || "").length
+    ? String(process.env.DB_ENABLED).toLowerCase() === "true"
+    : Boolean(DATABASE_URL);
+
+// NOTE: Render Postgres typically requires SSL from app -> DB.
+const pool = DB_ENABLED
+  ? new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+  })
+  : null;
 
 // ===================================================================
 // Helpers
@@ -171,6 +202,15 @@ const httpGRA = axios.create({
 });
 
 // ===================================================================
+// SSE (Server-Sent Events) for live invoice feed
+// ===================================================================
+const clients = new Set();
+function sendToAll(payload) {
+  const data = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const res of clients) res.write(data);
+}
+
+// ===================================================================
 // FRIENDLY ERRORS (API responses)
 // ===================================================================
 function normalizeError(err) {
@@ -208,6 +248,12 @@ function normalizeError(err) {
     out.hint = "Check server logs (Python/reportlab).";
     return out;
   }
+  if (raw.toLowerCase().includes("database") || raw.toLowerCase().includes("postgres") || raw.toLowerCase().includes("pg")) {
+    out.title = "Database error";
+    out.message = "We couldn’t save/read data from the database.";
+    out.hint = "Check DATABASE_URL and ensure the Render Postgres instance is reachable.";
+    return out;
+  }
   return out;
 }
 
@@ -223,6 +269,540 @@ function sendApiError(res, err, status = 500) {
     detail: nice.detail,
   });
 }
+
+// ===================================================================
+// DATABASE: init + helpers
+// ===================================================================
+async function initDb() {
+  if (!DB_ENABLED || !pool) return { ok: false, message: "DB disabled." };
+
+  const sql = `
+  CREATE TABLE IF NOT EXISTS signed_invoices (
+    id SERIAL PRIMARY KEY,
+    doc_entry INTEGER UNIQUE,
+    doc_num INTEGER,
+    card_code TEXT,
+    card_name TEXT,
+    doc_currency TEXT,
+    doc_total NUMERIC,
+
+    invoice_number TEXT,
+    status TEXT,
+    calculation_type TEXT,
+    total_amount NUMERIC,
+    total_vat NUMERIC,
+    total_levy NUMERIC,
+
+    gra_receipt TEXT,
+    gra_signature TEXT,
+    qr_code TEXT,
+
+    request_payload JSONB,
+    response_payload JSONB,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_signed_invoices_created_at ON signed_invoices(created_at DESC);
+  `;
+
+  await pool.query(sql);
+  return { ok: true };
+}
+
+async function saveSignedInvoiceToDb({ docEntry, inv, requestPayload, responsePayload }) {
+  if (!DB_ENABLED || !pool) return;
+
+  const resp = responsePayload?.response || {};
+  const msg = resp?.message || {};
+
+  const status = String(resp?.status || "").toUpperCase();
+  if (status !== "SUCCESS") return; // store only success
+
+  const invoiceNumber = requestPayload?.invoiceNumber || null;
+  const calculationType = requestPayload?.calculationType || null;
+
+  const graReceipt = msg?.ysdcrecnum || msg?.ysdcRecNum || null;
+  const graSignature = msg?.ysdcregsig || msg?.ysdcRegSig || null;
+  const qrCode = resp?.qr_code || resp?.qrCode || msg?.ysdcqr || msg?.ysdcQr || null;
+
+  const q = `
+    INSERT INTO signed_invoices (
+      doc_entry, doc_num, card_code, card_name, doc_currency, doc_total,
+      invoice_number, status, calculation_type,
+      total_amount, total_vat, total_levy,
+      gra_receipt, gra_signature, qr_code,
+      request_payload, response_payload, updated_at
+    )
+    VALUES (
+      $1,$2,$3,$4,$5,$6,
+      $7,$8,$9,
+      $10,$11,$12,
+      $13,$14,$15,
+      $16,$17, NOW()
+    )
+    ON CONFLICT (doc_entry)
+    DO UPDATE SET
+      doc_num = EXCLUDED.doc_num,
+      card_code = EXCLUDED.card_code,
+      card_name = EXCLUDED.card_name,
+      doc_currency = EXCLUDED.doc_currency,
+      doc_total = EXCLUDED.doc_total,
+      invoice_number = EXCLUDED.invoice_number,
+      status = EXCLUDED.status,
+      calculation_type = EXCLUDED.calculation_type,
+      total_amount = EXCLUDED.total_amount,
+      total_vat = EXCLUDED.total_vat,
+      total_levy = EXCLUDED.total_levy,
+      gra_receipt = EXCLUDED.gra_receipt,
+      gra_signature = EXCLUDED.gra_signature,
+      qr_code = EXCLUDED.qr_code,
+      request_payload = EXCLUDED.request_payload,
+      response_payload = EXCLUDED.response_payload,
+      updated_at = NOW()
+  `;
+
+  await pool.query(q, [
+    Number(docEntry),
+    Number(inv?.DocNum ?? null),
+    String(inv?.CardCode ?? ""),
+    String(inv?.CardName ?? ""),
+    String(inv?.DocCurrency ?? ""),
+    inv?.DocTotal ?? null,
+
+    invoiceNumber,
+    "SUCCESS",
+    calculationType,
+
+    requestPayload?.totalAmount ?? null,
+    requestPayload?.totalVat ?? null,
+    requestPayload?.totalLevy ?? null,
+
+    graReceipt,
+    graSignature,
+    qrCode,
+
+    requestPayload || {},
+    responsePayload || {},
+  ]);
+}
+
+// DB endpoints (optional but useful on Render)
+app.get("/api/db/health", async (req, res) => {
+  try {
+    if (!DB_ENABLED || !pool) return res.json({ ok: true, dbEnabled: false });
+    const r = await pool.query("SELECT 1 as ok");
+    res.json({ ok: true, dbEnabled: true, db: r.rows?.[0] || null });
+  } catch (err) {
+    sendApiError(res, err, 500);
+  }
+});
+
+// ===================================================================
+// DB API: signed invoices (LIST + ONE)
+// ===================================================================
+
+// List signed invoices
+// GET /api/signed-invoices?limit=100&q=search
+app.get("/api/signed-invoices", async (req, res) => {
+  try {
+    if (!DB_ENABLED || !pool) return res.json({ ok: true, dbEnabled: false, value: [] });
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "100", 10), 1), 500);
+    const q = String(req.query.q || "").trim().toLowerCase();
+
+    if (q) {
+      const like = `%${q}%`;
+      const r = await pool.query(
+        `
+        SELECT
+          id, doc_entry, doc_num, card_code, card_name, doc_currency, doc_total,
+          invoice_number, status, calculation_type, total_amount, total_vat, total_levy,
+          gra_receipt, gra_signature, qr_code,
+          created_at, updated_at
+        FROM signed_invoices
+        WHERE
+          CAST(doc_entry AS TEXT) ILIKE $1 OR
+          COALESCE(invoice_number,'') ILIKE $1 OR
+          COALESCE(card_name,'') ILIKE $1 OR
+          COALESCE(card_code,'') ILIKE $1 OR
+          COALESCE(gra_receipt,'') ILIKE $1 OR
+          COALESCE(gra_signature,'') ILIKE $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        `,
+        [like, limit]
+      );
+
+      return res.json({ ok: true, dbEnabled: true, value: r.rows });
+    }
+
+    const r = await pool.query(
+      `
+      SELECT
+        id, doc_entry, doc_num, card_code, card_name, doc_currency, doc_total,
+        invoice_number, status, calculation_type, total_amount, total_vat, total_levy,
+        gra_receipt, gra_signature, qr_code,
+        created_at, updated_at
+      FROM signed_invoices
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [limit]
+    );
+
+    res.json({ ok: true, dbEnabled: true, value: r.rows });
+  } catch (err) {
+    sendApiError(res, err, 500);
+  }
+});
+
+// Single signed invoice by DocEntry
+app.get("/api/signed-invoice/:docEntry", async (req, res) => {
+  try {
+    const docEntry = Number(req.params.docEntry);
+    if (!Number.isFinite(docEntry) || docEntry <= 0) return sendApiError(res, new Error("Invalid DocEntry"), 400);
+
+    if (!DB_ENABLED || !pool) return res.json({ ok: true, dbEnabled: false, value: null });
+
+    const r = await pool.query(
+      `
+      SELECT *
+      FROM signed_invoices
+      WHERE doc_entry = $1
+      LIMIT 1
+      `,
+      [docEntry]
+    );
+
+    res.json({ ok: true, dbEnabled: true, value: r.rows?.[0] || null });
+  } catch (err) {
+    sendApiError(res, err, 500);
+  }
+});
+
+app.get("/signed-invoices", (req, res) => {
+  const bodyHtml = `
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-weight:900;font-size:16px">Signed invoices (from database)</div>
+          <div class="topMeta" style="margin-top:6px">
+            These are SUCCESS postings saved in PostgreSQL (<b>signed_invoices</b> table).
+          </div>
+        </div>
+        <div class="row">
+          <span class="chip">DB: <b>${DB_ENABLED ? "ON" : "OFF"}</b></span>
+          <a class="chip" href="/api/signed-invoices" target="_blank" rel="noreferrer">API JSON</a>
+          <a class="chip" href="/api/db/health" target="_blank" rel="noreferrer">DB health</a>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btnPrimary" id="reload">Reload</button>
+
+        <span class="chip">Limit</span>
+        <select id="limit">
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="200">200</option>
+          <option value="500">500</option>
+        </select>
+
+        <span class="chip">Search</span>
+        <input id="q" placeholder="DocEntry / Invoice No / Customer / Receipt / Signature..." style="min-width:320px;flex:1 1 280px"/>
+      </div>
+
+      <div id="meta" class="topMeta" style="margin-top:12px"></div>
+      <div class="tableWrap" id="tableWrap"></div>
+      <div class="topMeta" style="margin-top:10px">Tip: click a row to open the signed invoice details page.</div>
+    </div>
+
+    <script>
+      ${uiFetchJsonHelperJs()}
+
+      const metaEl = document.getElementById("meta");
+      const tableWrap = document.getElementById("tableWrap");
+      const limitEl = document.getElementById("limit");
+      const qEl = document.getElementById("q");
+
+      let allRows = [];
+
+      function safe(v){ return (v === null || v === undefined) ? "" : String(v); }
+      function d10(x){ return x ? String(x).slice(0,10) : ""; }
+
+      function pill(status){
+        const s = (safe(status) || "").toUpperCase();
+        if (s === "SUCCESS") return '<span class="pill pillOk">SUCCESS</span>';
+        if (!s) return '<span class="pill pillWarn">UNKNOWN</span>';
+        return '<span class="pill pillErr">' + s + '</span>';
+      }
+
+      function render(rows){
+        metaEl.textContent = rows.length
+          ? ('Loaded ' + rows.length + ' signed invoices')
+          : 'No signed invoices found (or DB disabled).';
+
+        tableWrap.innerHTML = rows.length ? \`
+          <table>
+            <thead>
+              <tr>
+                <th>DocEntry</th>
+                <th>DocNum</th>
+                <th>Customer</th>
+                <th>Invoice No</th>
+                <th>Receipt</th>
+                <th>Signature</th>
+                <th>Mode</th>
+                <th>Totals</th>
+                <th>Saved</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${rows.map(r => {
+                const de = Number(r.doc_entry);
+                const totals = 'Amt: ' + safe(r.total_amount) + ' • VAT: ' + safe(r.total_vat) + ' • Levy: ' + safe(r.total_levy);
+                return \`
+                  <tr data-docentry="\${de}">
+                    <td><b>\${safe(r.doc_entry)}</b></td>
+                    <td>\${safe(r.doc_num)}</td>
+                    <td>\${safe(r.card_name)}</td>
+                    <td>\${safe(r.invoice_number)}</td>
+                    <td>\${safe(r.gra_receipt)}</td>
+                    <td>\${safe(r.gra_signature)}</td>
+                    <td>\${safe(r.calculation_type)}</td>
+                    <td>\${totals}</td>
+                    <td>\${d10(r.created_at)}</td>
+                  </tr>\`;
+              }).join("")}
+            </tbody>
+          </table>\` : '<div class="topMeta" style="margin-top:10px">(nothing to show)</div>';
+      }
+
+      function applyFilter(){
+        const q = safe(qEl.value).trim().toLowerCase();
+        if (!q){ render(allRows); return; }
+
+        const filtered = allRows.filter(r => {
+          const hay = [
+            r.doc_entry, r.doc_num, r.card_name, r.card_code,
+            r.invoice_number, r.gra_receipt, r.gra_signature,
+            r.calculation_type
+          ].map(safe).join(" ").toLowerCase();
+          return hay.includes(q);
+        });
+
+        render(filtered);
+      }
+
+      async function load(){
+        if (!${DB_ENABLED ? "true" : "false"}){
+          metaEl.textContent = "Database is disabled. Set DATABASE_URL (Render) or DB_ENABLED=true.";
+          tableWrap.innerHTML = "";
+          return;
+        }
+
+        const limit = Number(limitEl.value || "100");
+        const data = await fetchJson('/api/signed-invoices?limit=' + encodeURIComponent(limit));
+        allRows = (data.value || []);
+        render(allRows);
+        applyFilter();
+      }
+
+      document.getElementById("reload").addEventListener("click", load);
+      limitEl.addEventListener("change", load);
+      qEl.addEventListener("input", applyFilter);
+
+      tableWrap.addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-docentry]");
+        if (!tr) return;
+        const docEntry = Number(tr.getAttribute("data-docentry"));
+        if (!docEntry) return;
+        location.href = "/signed-invoice/" + docEntry;
+      });
+
+      load();
+    </script>
+  `;
+
+  res.send(
+    renderShell({
+      title: "Signed invoices",
+      active: "signed",
+      topTitle: "Signed invoices",
+      topMeta: "Database-backed list of SUCCESS GRA postings.",
+      bodyHtml,
+    })
+  );
+});
+
+app.get("/signed-invoice/:docEntry", (req, res) => {
+  const docEntry = Number(req.params.docEntry || 0);
+
+  const bodyHtml = `
+    <div class="row" style="margin-bottom:12px">
+      <a class="chip" href="/signed-invoices">← Back to signed list</a>
+      <a class="chip" href="/invoice/${docEntry}">Open SAP invoice page</a>
+      <a class="chip" href="/api/signed-invoice/${docEntry}" target="_blank" rel="noreferrer">API JSON</a>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-weight:900;font-size:16px">Signed invoice details</div>
+          <div class="topMeta" style="margin-top:6px">DocEntry: <b id="docEntry">${docEntry}</b></div>
+        </div>
+        <div class="row">
+          <span class="chip">DB: <b>${DB_ENABLED ? "ON" : "OFF"}</b></span>
+        </div>
+      </div>
+
+      <div id="summary" style="margin-top:12px"></div>
+
+      <div class="grid grid2" style="margin-top:14px">
+        <div>
+          <details open>
+            <summary>Request payload (what you posted to GRA)</summary>
+            <div class="detailsBody">
+              <pre id="reqOut" style="margin-top:10px">Loading...</pre>
+            </div>
+          </details>
+        </div>
+
+        <div>
+          <details open>
+            <summary>Response payload (signed SUCCESS response)</summary>
+            <div class="detailsBody">
+              <pre id="respOut" style="margin-top:10px">Loading...</pre>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      ${uiFetchJsonHelperJs()}
+
+      function safe(v){ return (v === null || v === undefined) ? "" : String(v); }
+
+      function pill(status){
+        const s = (safe(status) || "").toUpperCase();
+        if (s === "SUCCESS") return '<span class="pill pillOk">SUCCESS</span>';
+        if (!s) return '<span class="pill pillWarn">UNKNOWN</span>';
+        return '<span class="pill pillErr">' + s + '</span>';
+      }
+
+      (async function(){
+        const docEntry = Number(document.getElementById("docEntry").textContent || "0");
+        const summary = document.getElementById("summary");
+        const reqOut = document.getElementById("reqOut");
+        const respOut = document.getElementById("respOut");
+
+        if (!${DB_ENABLED ? "true" : "false"}){
+          summary.innerHTML = \`
+            <div class="alert alertError">
+              <div class="alertIcon">!</div>
+              <div>
+                <div style="font-weight:900">Database is disabled</div>
+                <div style="margin-top:3px">Set DATABASE_URL on Render (or DB_ENABLED=true) to use this page.</div>
+              </div>
+            </div>\`;
+          reqOut.textContent = "";
+          respOut.textContent = "";
+          return;
+        }
+
+        try{
+          const data = await fetchJson("/api/signed-invoice/" + docEntry);
+          const rec = data.value;
+
+          if (!rec){
+            summary.innerHTML = \`
+              <div class="alert alertWarn">
+                <div class="alertIcon">!</div>
+                <div>
+                  <div style="font-weight:900">No signed record found</div>
+                  <div style="margin-top:3px">This DocEntry has not been saved as SUCCESS in the database.</div>
+                </div>
+              </div>\`;
+            reqOut.textContent = "";
+            respOut.textContent = "";
+            return;
+          }
+
+          const status = safe(rec.status || "SUCCESS");
+          const qr = safe(rec.qr_code || "");
+          const qrImg = qr ? ("https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=" + encodeURIComponent(qr)) : "";
+
+          summary.innerHTML = \`
+            <div class="row" style="gap:12px;flex-wrap:wrap">
+              \${pill(status)}
+              <span class="chip">Invoice No: <b>\${safe(rec.invoice_number)}</b></span>
+              <span class="chip">Receipt: <b>\${safe(rec.gra_receipt)}</b></span>
+              <span class="chip">Signature: <b>\${safe(rec.gra_signature)}</b></span>
+              <span class="chip">Mode: <b>\${safe(rec.calculation_type)}</b></span>
+              <span class="chip">Saved: <b>\${safe(rec.created_at).slice(0,19).replace("T"," ")}</b></span>
+            </div>
+
+            <div class="grid grid2" style="margin-top:12px">
+              <div class="card">
+                <div style="font-weight:900">Customer</div>
+                <div style="margin-top:6px">\${safe(rec.card_name)}</div>
+                <div class="topMeta" style="margin-top:6px">CardCode: <b>\${safe(rec.card_code)}</b></div>
+              </div>
+              <div class="card">
+                <div style="font-weight:900">Totals</div>
+                <div class="topMeta" style="margin-top:6px">
+                  Amount: <b>\${safe(rec.total_amount)}</b> • VAT: <b>\${safe(rec.total_vat)}</b> • Levy: <b>\${safe(rec.total_levy)}</b>
+                </div>
+                <div class="topMeta" style="margin-top:6px">
+                  SAP Total: <b>\${safe(rec.doc_total)}</b> \${safe(rec.doc_currency)}
+                </div>
+              </div>
+            </div>
+
+            \${qr ? \`
+              <div class="card" style="margin-top:12px">
+                <div style="font-weight:900">Verification</div>
+                <div class="row" style="margin-top:10px">
+                  <a class="chip" href="\${qr}" target="_blank" rel="noreferrer">Open verification link</a>
+                </div>
+                \${qrImg ? '<div style="margin-top:10px"><img class="qr" src="' + qrImg + '" alt="QR Code"/></div>' : ''}
+              </div>\` : "" }
+          \`;
+
+          reqOut.textContent = JSON.stringify(rec.request_payload || {}, null, 2);
+          respOut.textContent = JSON.stringify(rec.response_payload || {}, null, 2);
+        }catch(e){
+          summary.innerHTML = \`
+            <div class="alert alertError">
+              <div class="alertIcon">!</div>
+              <div style="width:100%">
+                <div style="font-weight:900">Failed to load signed invoice</div>
+                <div style="margin-top:6px">\${safe(e?.userMessage || e?.message || "Unknown error")}</div>
+                \${e?.hint ? '<div class="topMeta" style="margin-top:6px">Tip: ' + safe(e.hint) + '</div>' : ''}
+                <pre style="margin-top:10px">\${JSON.stringify(e, null, 2)}</pre>
+              </div>
+            </div>\`;
+          reqOut.textContent = "";
+          respOut.textContent = "";
+        }
+      })();
+    </script>
+  `;
+
+  res.send(
+    renderShell({
+      title: `Signed invoice ${docEntry}`,
+      active: "signed",
+      topTitle: "Signed invoice",
+      topMeta: "Full DB record + request/response JSON.",
+      bodyHtml,
+    })
+  );
+});
 
 // ===================================================================
 // STATE (poll checkpoint)
@@ -258,15 +838,6 @@ function cookieHeader() {
   if (B1SESSION) parts.push(`B1SESSION=${B1SESSION}`);
   if (ROUTEID) parts.push(`ROUTEID=${ROUTEID}`);
   return parts.join("; ");
-}
-
-// ===================================================================
-// SSE (Server-Sent Events) for live invoice feed
-// ===================================================================
-const clients = new Set();
-function sendToAll(payload) {
-  const data = `data: ${JSON.stringify(payload)}\n\n`;
-  for (const res of clients) res.write(data);
 }
 
 async function sapLogin() {
@@ -370,7 +941,7 @@ function loadGraResults() {
     const raw = fs.readFileSync(GRA_RESULTS_FILE, "utf-8");
     const json = JSON.parse(raw || "{}");
     for (const [k, v] of Object.entries(json || {})) graResults.set(Number(k), v);
-  } catch {}
+  } catch { }
 }
 function saveGraResults() {
   const obj = {};
@@ -388,7 +959,7 @@ function loadRefundResults() {
     const raw = fs.readFileSync(REFUND_RESULTS_FILE, "utf-8");
     const json = JSON.parse(raw || "{}");
     for (const [k, v] of Object.entries(json || {})) refundResults.set(String(k), v);
-  } catch {}
+  } catch { }
 }
 function saveRefundResults() {
   const obj = {};
@@ -1160,7 +1731,7 @@ app.get("/api/invoices/summary", async (req, res) => {
 
     const data = await sapGet(
       `/Invoices?$select=DocEntry,DocNum,CardCode,CardName,DocTotal,DocCurrency,DocRate,DocDate,DocTime,TaxDate,CreationDate,UpdateDate,UpdateTime,DocumentStatus,Cancelled,NumAtCard,Comments,Reference1,VatSum` +
-        `&$orderby=DocEntry desc&$top=${pageSize}&$skip=${skip}`
+      `&$orderby=DocEntry desc&$top=${pageSize}&$skip=${skip}`
     );
 
     res.json({ ok: true, page, pageSize, value: data.value || [] });
@@ -1341,6 +1912,7 @@ app.get("/api/gra/payload/:docEntry", async (req, res) => {
         levyRates: getLevyRatesForDate(payload.transactionDate),
         levyMode: GRA_LEVY_MODE,
         itemMapKeys: Object.keys(GRA_ITEM_CODE_MAP).length,
+        dbEnabled: DB_ENABLED,
       },
     });
   } catch (err) {
@@ -1349,7 +1921,7 @@ app.get("/api/gra/payload/:docEntry", async (req, res) => {
 });
 
 // ===================================================================
-// API: POST TO GRA
+// API: POST TO GRA (NOW ALSO STORES SUCCESS TO POSTGRES)
 // ===================================================================
 app.post("/api/gra/post/:docEntry", async (req, res) => {
   try {
@@ -1395,6 +1967,7 @@ app.post("/api/gra/post/:docEntry", async (req, res) => {
 
     const responsePayload = post.responseBody;
 
+    // Save to file store (existing behavior)
     graResults.set(docEntry, {
       savedAt: new Date().toISOString(),
       requestPayload: payload,
@@ -1402,7 +1975,19 @@ app.post("/api/gra/post/:docEntry", async (req, res) => {
     });
     saveGraResults();
 
-    res.json({ ok: true, docEntry, response: responsePayload });
+    // Save SUCCESS to Postgres (NEW behavior, non-blocking)
+    if (DB_ENABLED && pool) {
+      saveSignedInvoiceToDb({ docEntry, inv, requestPayload: payload, responsePayload })
+        .then(() => {
+          sendToAll({ type: "INFO", message: `Saved signed invoice to DB (DocEntry ${docEntry}).` });
+        })
+        .catch((e) => {
+          console.error("DB save error:", e);
+          sendToAll({ type: "WARN", message: `Posted OK but DB save failed for DocEntry ${docEntry}.` });
+        });
+    }
+
+    res.json({ ok: true, docEntry, response: responsePayload, dbSaved: DB_ENABLED });
   } catch (err) {
     sendApiError(res, err, 500);
   }
@@ -1440,7 +2025,7 @@ app.get("/api/gra/post-result/:docEntry/pdf", async (req, res) => {
     fs.createReadStream(pdfPath).pipe(res).on("close", () => {
       try {
         fs.unlinkSync(pdfPath);
-      } catch {}
+      } catch { }
     });
   } catch (err) {
     sendApiError(res, err, 500);
@@ -1666,7 +2251,13 @@ function uiCss() {
   tbody td{padding:12px;border-bottom:1px solid var(--border)}
   pre{background:#0b1020;color:#e6edf3;padding:12px;border-radius:12px;overflow:auto;max-height:70vh;font-family:var(--mono);font-size:12px}
   img.qr{max-width:240px;width:100%;height:auto;border-radius:12px;border:1px solid var(--border);background:#fff;padding:8px}
-
+  details{border:1px solid var(--border);border-radius:12px;background:#fff}
+  summary{cursor:pointer;padding:10px 12px;font-weight:800}
+  details .detailsBody{padding:0 12px 12px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:var(--chipBg);font-size:12px}
+  .pillOk{background:#dcfce7;border-color:#bbf7d0;color:#14532d}
+  .pillWarn{background:#fffbeb;border-color:#fde68a;color:#92400e}
+  .pillErr{background:#fee2e2;border-color:#fecaca;color:#7f1d1d}
   @media (max-width:980px){
     .layout{grid-template-columns:1fr}
     .sidebar{position:sticky;top:0;z-index:30;padding:14px 12px}
@@ -1720,12 +2311,15 @@ function renderShell({ title, active, topTitle, topMeta, bodyHtml }) {
         <a class="${isActive("gra")}" href="/gra"><span>Payload</span><span class="navHint">Checks</span></a>
         <a class="${isActive("post")}" href="/post-gra"><span>Post</span><span class="navHint">GRA</span></a>
         <a class="${isActive("refund")}" href="/post-refund"><span>Refund</span><span class="navHint">GRA</span></a>
+        <a class="${isActive("signed")}" href="/signed-invoices"><span>Signed</span><span class="navHint">DB</span></a
       </nav>
       <div style="margin-top:14px;padding:12px;border:1px solid rgba(226,232,240,.10);border-radius:12px">
         <div class="navHint">Posting</div>
         <div style="font-weight:900;margin-top:4px">${GRA_POST_ENABLED ? "ENABLED" : "DISABLED"}</div>
         <div class="navHint" style="margin-top:10px">Refunds</div>
         <div style="font-weight:900;margin-top:4px">${REFUND_POST_ENABLED ? "ENABLED" : "DISABLED"}</div>
+        <div class="navHint" style="margin-top:10px">Database</div>
+        <div style="font-weight:900;margin-top:4px">${DB_ENABLED ? "ENABLED" : "DISABLED"}</div>
         <div class="navHint" style="margin-top:10px">Tax regime</div>
         <div style="font-weight:900;margin-top:4px">NEW (VAT on base)</div>
       </div>
@@ -1754,7 +2348,7 @@ function renderShell({ title, active, topTitle, topMeta, bodyHtml }) {
 }
 
 // ===================================================================
-// UI: SAFE fetchJson helper (string we embed into every page script)
+// UI: SAFE fetchJson helper (fixes "Unexpected end of JSON input")
 // ===================================================================
 function uiFetchJsonHelperJs() {
   return `
@@ -1861,6 +2455,9 @@ app.get("/", (req, res) => {
         if (msg.type === "ERROR") {
           showErrorBox("Live feed error", msg.message || "Something went wrong.", "Check SAP connection and try again.");
         }
+        if (msg.type === "WARN") {
+          showErrorBox("Warning", msg.message || "Something needs attention.", "");
+        }
       };
     </script>
   `;
@@ -1878,6 +2475,7 @@ app.get("/invoices", (req, res) => {
         <div class="row">
           <span class="chip">Posting: <b>${GRA_POST_ENABLED ? "ON" : "OFF"}</b></span>
           <span class="chip">Refunds: <b>${REFUND_POST_ENABLED ? "ON" : "OFF"}</b></span>
+          <span class="chip">DB: <b>${DB_ENABLED ? "ON" : "OFF"}</b></span>
         </div>
       </div>
 
@@ -2046,6 +2644,7 @@ app.get("/invoice/:docEntry", (req, res) => {
       <a class="chip" href="/gra#docEntry=${docEntry}">Payload + Checks</a>
       <a class="chip" href="/post-gra#docEntry=${docEntry}">Post to GRA</a>
       <a class="chip" href="/post-refund#docEntry=${docEntry}">Refund</a>
+      <a class="chip" href="/api/signed-invoice/${docEntry}" target="_blank" rel="noreferrer">Signed record (DB)</a>
     </div>
 
     <div class="grid grid2">
@@ -2095,6 +2694,7 @@ app.get("/gra", (req, res) => {
         <div class="row">
           <a class="chip" href="/invoices">Back to invoices</a>
           <a class="chip" href="/post-gra">Go to posting</a>
+          <a class="chip" href="/api/signed-invoices" target="_blank" rel="noreferrer">Signed invoices (DB)</a>
         </div>
       </div>
 
@@ -2136,7 +2736,11 @@ app.get("/gra", (req, res) => {
           <div class="row" style="justify-content:space-between;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:#fff;margin-bottom:8px">
             <div>
               <div style="font-weight:900">DocEntry: \${d}</div>
-              <div class="topMeta"><a href="/invoice/\${d}">Open invoice</a> • <a href="/post-gra#docEntry=\${d}">Post</a></div>
+              <div class="topMeta">
+                <a href="/invoice/\${d}">Open invoice</a> •
+                <a href="/post-gra#docEntry=\${d}">Post</a> •
+                <a href="/api/signed-invoice/\${d}" target="_blank" rel="noreferrer">DB record</a>
+              </div>
             </div>
             <button class="btnDanger" data-remove="\${d}">Remove</button>
           </div>\`).join("");
@@ -2237,11 +2841,13 @@ app.get("/post-gra", (req, res) => {
           <div style="font-weight:900;font-size:16px">Post to GRA + show response</div>
           <div class="topMeta" style="margin-top:6px">
             Posting is: <b>${GRA_POST_ENABLED ? "ENABLED" : "DISABLED"}</b>. This page blocks posting when checks fail.
+            Database is: <b>${DB_ENABLED ? "ENABLED" : "DISABLED"}</b>.
           </div>
         </div>
         <div class="row">
           <a class="chip" href="/invoices">Back to invoices</a>
           <a class="chip" href="/gra">Payload checks</a>
+          <a class="chip" href="/api/signed-invoices" target="_blank" rel="noreferrer">Signed invoices (DB)</a>
         </div>
       </div>
 
@@ -2366,6 +2972,7 @@ app.get("/post-gra", (req, res) => {
               \${ok ? \`
                 <div class="row" style="margin-top:10px">
                   <a class="chip" href="/api/gra/post-result/\${de}/pdf" target="_blank" rel="noreferrer">Export response as PDF</a>
+                  <a class="chip" href="/api/signed-invoice/\${de}" target="_blank" rel="noreferrer">DB record</a>
                 </div>
               \` : ""}
 
@@ -2376,10 +2983,9 @@ app.get("/post-gra", (req, res) => {
 
       function renderPostError(e){
         const kind = e?.kind || "UNKNOWN";
-        const httpStatus = e?.httpStatus || e?.httpStatus === 0 ? e.httpStatus : (e?.httpStatus || e?.status || "");
+        const httpStatus = e?.httpStatus || e?.status || "";
         const body = e?.responseBody;
         const msg = e?.message || "Posting failed.";
-
         const pretty = body ? JSON.stringify(body, null, 2) : (e?.rawText ? e.rawText : JSON.stringify(e, null, 2));
 
         postResult.innerHTML = \`
@@ -2774,19 +3380,42 @@ app.use((err, req, res, next) => {
 // ===================================================================
 // START
 // ===================================================================
-const server = app.listen(process.env.PORT || PORT, () => {
-  console.log(`Running on http://localhost:${process.env.PORT || PORT}`);
-  console.log(`Polling every ${POLL_MS}ms`);
-  console.log(`Posting enabled: ${GRA_POST_ENABLED}`);
-  console.log(`VAT rate: ${GRA_VAT_RATE}`);
-  console.log(`Levy rates: ${JSON.stringify(GRA_LEVY_RATES_BASE)}`);
-  console.log(`Item map keys: ${Object.keys(GRA_ITEM_CODE_MAP).length}`);
-
-  console.log(`Refund posting enabled: ${REFUND_POST_ENABLED}`);
-  console.log(`Refund invoice url set: ${Boolean(REFUND_INVOICE_URL)}`);
-  console.log(`Refund cancel url set: ${Boolean(REFUND_CANCEL_URL)}`);
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED PROMISE REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
 });
 
-// Helps reduce dropped responses under some proxies
-server.headersTimeout = 65000;
-server.requestTimeout = 65000;
+(async function start() {
+  if (DB_ENABLED) {
+    try {
+      await initDb();
+      console.log("DB init: OK (signed_invoices table ready)");
+    } catch (e) {
+      console.error("DB init failed:", e);
+      sendToAll({ type: "WARN", message: "Database init failed. Posting will still work, but DB saving may fail." });
+    }
+  } else {
+    console.log("DB init: skipped (DB disabled or DATABASE_URL missing)");
+  }
+
+  const server = app.listen(process.env.PORT || PORT, () => {
+    console.log(`Running on http://localhost:${process.env.PORT || PORT}`);
+    console.log(`Polling every ${POLL_MS}ms`);
+    console.log(`Posting enabled: ${GRA_POST_ENABLED}`);
+    console.log(`VAT rate: ${GRA_VAT_RATE}`);
+    console.log(`Levy rates: ${JSON.stringify(GRA_LEVY_RATES_BASE)}`);
+    console.log(`Item map keys: ${Object.keys(GRA_ITEM_CODE_MAP).length}`);
+
+    console.log(`Refund posting enabled: ${REFUND_POST_ENABLED}`);
+    console.log(`Refund invoice url set: ${Boolean(REFUND_INVOICE_URL)}`);
+    console.log(`Refund cancel url set: ${Boolean(REFUND_CANCEL_URL)}`);
+
+    console.log(`DB enabled: ${DB_ENABLED}`);
+  });
+
+  // Helps reduce dropped responses under some proxies
+  server.headersTimeout = 65000;
+  server.requestTimeout = 65000;
+})();
