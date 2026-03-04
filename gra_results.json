@@ -179,6 +179,66 @@
       }
     }
   },
+  "20718": {
+    "savedAt": "2026-03-04T10:11:48.899Z",
+    "requestPayload": {
+      "currency": "GHS",
+      "exchangeRate": 1,
+      "invoiceNumber": "SAP-0530",
+      "totalLevy": 25,
+      "userName": "Kofi Ghana",
+      "flag": "INVOICE",
+      "calculationType": "EXCLUSIVE",
+      "totalVat": 75,
+      "transactionDate": "2026-02-02T17:26:00Z",
+      "totalAmount": 500,
+      "voucherAmount": 0,
+      "businessPartnerName": "MYLA HOMES",
+      "businessPartnerTin": "C0000000000",
+      "saleType": "NORMAL",
+      "discountType": "GENERAL",
+      "discountAmount": 0,
+      "reference": "",
+      "groupReferenceId": "",
+      "purchaseOrderReference": "",
+      "items": [
+        {
+          "itemCode": "102392",
+          "itemCategory": "",
+          "expireDate": "",
+          "description": "MC-Krete HP",
+          "quantity": 50,
+          "levyAmountA": 12.5,
+          "levyAmountB": 12.5,
+          "levyAmountC": 0,
+          "levyAmountD": 0,
+          "levyAmountE": 0,
+          "discountAmount": 0,
+          "batchCode": "",
+          "unitPrice": 10
+        }
+      ]
+    },
+    "responsePayload": {
+      "response": {
+        "distributor_tin": "CXX000000YY",
+        "message": {
+          "num": "SAP-0530",
+          "ysdcid": "E000001001",
+          "ysdcrecnum": "1001-6270-NS26",
+          "ysdcintdata": "TFC6-T3ZV-B2DT-K3GH-NXFA-766O-44",
+          "ysdcregsig": "IAAT-2J4N-3FSJ-OOYS",
+          "ysdcmrc": "00:0C:29:0D:90:D0",
+          "ysdcmrctim": "2026/03/04 10:12:40",
+          "ysdctime": "2026/03/04 10:12:40",
+          "flag": "INVOICE",
+          "ysdcitems": "1"
+        },
+        "qr_code": "https://verification.vat-gh.com?data=LBrekxveywE98oowtgszVcj27ARS1zAEneSwgLF0B0aPcwzbB8rszreS8UAbACApiWtHwQlG96iwj5mCaUkal5oxozNRwxcTRoU7h83Fd6IFrULywx8SvlicodU+m9eNp90CAc5ctBkJ7BE5oB2anE/bEA4cYsRJzLduzxbxqiHk+dynbP/mKJ1xcFIlq7RYucDh7whAC3mlu3hlDxKAHBPgGFLgO60EPFkHat5jIYt+4bmRjmwvKsLIy/wwXK+lig4qCEp9xXSUCDh6KHxcFCAEMObnQlMDag62tb9cbzc=&v=1.1&t=i",
+        "status": "SUCCESS"
+      }
+    }
+  },
   "20727": {
     "savedAt": "2026-03-04T08:33:47.119Z",
     "requestPayload": {

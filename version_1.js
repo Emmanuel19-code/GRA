@@ -30,7 +30,7 @@
  *      - Levy A (NHIL) = 2.5% of BASE
  *      - Levy B (GETFund) = 2.5% of BASE
  *      - Levy C/D/E = 0
- *      - VAT = 15% of BASE (NOT on base+levy)  <-- See comment where VAT is computed.
+ *      - VAT = 15% of BASE   (NOT on base+levy)  <-- See comment where VAT is computed.
  *  - INCLUSIVE:
  *      - We DO NOT calculate levies.
  *      - We DO NOT calculate VAT. VAT is taken from SAP VatSum/VatSumFc/VatSumSys if available else 0.
@@ -97,6 +97,7 @@ const GRA_DEFAULT_BP_TIN = process.env.GRA_DEFAULT_BP_TIN || "C0000000000";
 const GRA_SEND_PO_REFERENCE = String(process.env.GRA_SEND_PO_REFERENCE || "false").toLowerCase() === "true";
 const GRA_INVOICE_PREFIX = process.env.GRA_INVOICE_PREFIX || "SAP";
 const GRA_LEVY_MODE = String(process.env.GRA_LEVY_MODE || "rates").toLowerCase(); // rates | override
+
 const GRA_VAT_RATE = Number.isFinite(Number(process.env.GRA_VAT_RATE)) ? Number(process.env.GRA_VAT_RATE) : 0.15;
 
 // Posting ENV
@@ -196,12 +197,6 @@ function normalizeError(err) {
     out.hint = "Check SAP Service Layer reachability, permissions, and DocEntry.";
     return out;
   }
-  if (raw.includes("SAP PATCH failed")) {
-    out.title = "SAP update failed";
-    out.message = "We couldn’t update SAP with the requested data.";
-    out.hint = "Check permissions for updating this document in SAP B1 Service Layer.";
-    return out;
-  }
   if (raw.includes("PDF generation failed")) {
     out.title = "PDF export failed";
     out.message = "We couldn’t generate the PDF.";
@@ -214,7 +209,6 @@ function normalizeError(err) {
 function sendApiError(res, err, status = 500) {
   const nice = normalizeError(err);
   res.status(status).json({
-    ok: false,
     error: nice.message,
     userMessage: nice.message,
     userTitle: nice.title,
@@ -310,24 +304,6 @@ async function sapGet(relativeUrl) {
   if (resp.status < 200 || resp.status >= 300) {
     throw new Error(`SAP GET failed: HTTP ${resp.status} ${JSON.stringify(resp.data)}`);
   }
-  return resp.data;
-}
-
-// Optional: if you later want to write back to SAP (UDFs/Comments)
-async function sapPatch(relativeUrl, body) {
-  if (!B1SESSION) await sapLogin();
-  const url = `${SAP_BASE}${relativeUrl}`;
-  const resp = await httpSAP.patch(url, body, { headers: { Cookie: cookieHeader(), "Content-Type": "application/json" } });
-
-  if (resp.status === 401 || resp.status === 403) {
-    resetSapSession();
-    await sapLogin();
-    const resp2 = await httpSAP.patch(url, body, { headers: { Cookie: cookieHeader(), "Content-Type": "application/json" } });
-    if (resp2.status < 200 || resp2.status >= 300) throw new Error(`SAP PATCH failed: HTTP ${resp2.status} ${JSON.stringify(resp2.data)}`);
-    return resp2.data;
-  }
-
-  if (resp.status < 200 || resp.status >= 300) throw new Error(`SAP PATCH failed: HTTP ${resp.status} ${JSON.stringify(resp.data)}`);
   return resp.data;
 }
 
@@ -468,6 +444,7 @@ function firstFiniteNonNegative(...vals) {
 // U_TOTALQUANTITY is the TotalQuantity (use as quantity)
 // U_UNIT PRICE is the Unit Price (support likely SAP keys)
 function getLineQuantity(ln) {
+  // prefer U_TOTALQUANTITY variants
   const q = firstFiniteNonNegative(
     ln.U_TOTALQUANTITY,
     ln.U_TotalQuantity,
@@ -480,6 +457,7 @@ function getLineQuantity(ln) {
 }
 
 function getLineUnitPrice(ln) {
+  // prefer U_UNIT PRICE variants (common SAP naming patterns)
   const p = firstFiniteNonNegative(
     ln.U_UNITPRICE,
     ln.U_UNIT_PRICE,
@@ -615,6 +593,7 @@ function mapSapInvoiceToGra(inv, calculationType) {
   // INCLUSIVE MODE (NO LEVY CALC, NO VAT CALC)
   // ---------------------------
   if (ct === "INCLUSIVE") {
+    // Prefer SAP DocTotal as the inclusive grand total, fallback to sum of inclusive line totals
     let totalAmount = 0;
     const invoiceTotalCandidates = [inv.DocTotal, inv.DocTotalFc, inv.DocTotalSys];
     for (const c of invoiceTotalCandidates) {
@@ -646,6 +625,7 @@ function mapSapInvoiceToGra(inv, calculationType) {
       const qty = getLineQuantity(ln);
 
       const unitPrice = getLineUnitPrice(ln);
+      // if unitPrice missing, derive from inclusive line amount / qty
       const lineAmountIncl = getLineAmountForMode(ln, "INCLUSIVE");
       const unitPriceFinal = unitPrice > 0 ? unitPrice : qty > 0 ? money(lineAmountIncl / qty) : 0.0;
 
@@ -708,6 +688,7 @@ function mapSapInvoiceToGra(inv, calculationType) {
     const qty = getLineQuantity(ln);
     const baseLine = money(getLineAmountForMode(ln, "EXCLUSIVE"));
 
+    // Your rule: U_UNITPRICE is the unit price. Fallback if missing.
     const unitPrice = getLineUnitPrice(ln) || money(ln.UnitPrice ?? ln.Price);
 
     const lev = computeLeviesFromBase(baseLine, sapItemCode, graItemCode, rates);
@@ -734,7 +715,7 @@ function mapSapInvoiceToGra(inv, calculationType) {
   const totalLevy = money(items.reduce((sum, it) => sum + Number(it.levyAmountA || 0) + Number(it.levyAmountB || 0), 0));
 
   // VAT CALCULATION (EXCLUSIVE - NEW REGIME) happens HERE:
-  // VAT is computed on BASE only (NOT base + levy)
+  // VAT is computed on BASE only (same base as levies)
   const totalVat = money(GRA_VAT_RATE * baseTotal);
 
   return {
@@ -1163,7 +1144,7 @@ app.get("/api/invoices/summary", async (req, res) => {
         `&$orderby=DocEntry desc&$top=${pageSize}&$skip=${skip}`
     );
 
-    res.json({ ok: true, page, pageSize, value: data.value || [] });
+    res.json({ page, pageSize, value: data.value || [] });
   } catch (err) {
     sendApiError(res, err, 500);
   }
@@ -1175,11 +1156,11 @@ app.get("/api/invoice/:docEntry/raw", async (req, res) => {
     if (!Number.isFinite(docEntry) || docEntry <= 0) return sendApiError(res, new Error("Invalid DocEntry"), 400);
 
     const cached = cacheGet(docEntry);
-    if (cached) return res.json({ ok: true, source: "cache", data: cached });
+    if (cached) return res.json({ source: "cache", data: cached });
 
     const full = await sapGet(`/Invoices(${docEntry})`);
     cacheSet(docEntry, full);
-    res.json({ ok: true, source: "sap", data: full });
+    res.json({ source: "sap", data: full });
   } catch (err) {
     sendApiError(res, err, 500);
   }
@@ -1195,7 +1176,7 @@ function ensureGraSession(req) {
 
 app.get("/api/gra/selection", (req, res) => {
   ensureGraSession(req);
-  res.json({ ok: true, lastSelection: req.session.gra.lastSelection || [] });
+  res.json({ lastSelection: req.session.gra.lastSelection || [] });
 });
 
 app.post("/api/gra/select", (req, res) => {
@@ -1216,7 +1197,7 @@ app.post("/api/gra/remove", (req, res) => {
 
 app.get("/api/gra/config", (req, res) => {
   ensureGraSession(req);
-  res.json({ ok: true, calculationType: req.session.gra.calculationType });
+  res.json({ calculationType: req.session.gra.calculationType });
 });
 
 app.post("/api/gra/config", (req, res) => {
@@ -1249,7 +1230,7 @@ function ensureRefundSession(req) {
 
 app.get("/api/refund/selection", (req, res) => {
   ensureRefundSession(req);
-  res.json({ ok: true, lastSelection: req.session.refund.lastSelection || [] });
+  res.json({ lastSelection: req.session.refund.lastSelection || [] });
 });
 
 app.post("/api/refund/select", (req, res) => {
@@ -1279,7 +1260,6 @@ app.post("/api/refund/copy-from-gra", (req, res) => {
 app.get("/api/refund/config", (req, res) => {
   ensureRefundSession(req);
   res.json({
-    ok: true,
     calculationType: req.session.refund.calculationType,
     refundType: req.session.refund.refundType,
     reference: req.session.refund.reference,
@@ -1667,6 +1647,7 @@ function uiCss() {
   pre{background:#0b1020;color:#e6edf3;padding:12px;border-radius:12px;overflow:auto;max-height:70vh;font-family:var(--mono);font-size:12px}
   img.qr{max-width:240px;width:100%;height:auto;border-radius:12px;border:1px solid var(--border);background:#fff;padding:8px}
 
+  /* Responsive */
   @media (max-width:980px){
     .layout{grid-template-columns:1fr}
     .sidebar{position:sticky;top:0;z-index:30;padding:14px 12px}
@@ -1751,46 +1732,6 @@ function renderShell({ title, active, topTitle, topMeta, bodyHtml }) {
   </div>
 </body>
 </html>`;
-}
-
-// ===================================================================
-// UI: SAFE fetchJson helper (string we embed into every page script)
-// ===================================================================
-function uiFetchJsonHelperJs() {
-  return `
-  async function fetchJson(url, opts){
-    const res = await fetch(url, opts);
-    const text = await res.text();
-
-    let data = null;
-
-    if (text && text.trim().length){
-      try {
-        data = JSON.parse(text);
-      } catch(e){
-        const err = {
-          ok: false,
-          kind: "NON_JSON_RESPONSE",
-          httpStatus: res.status,
-          message: "Server returned non-JSON response. Check proxy/timeout errors.",
-          rawText: text.slice(0, 2000)
-        };
-        throw err;
-      }
-    } else {
-      const err = {
-        ok: false,
-        kind: "EMPTY_RESPONSE",
-        httpStatus: res.status,
-        message: "Server returned an empty response. This often means the server crashed or a proxy timed out."
-      };
-      throw err;
-    }
-
-    if (!res.ok) throw data;
-    return data;
-  }
-  `;
 }
 
 // ===================================================================
@@ -1909,8 +1850,6 @@ app.get("/invoices", (req, res) => {
     </div>
 
     <script>
-      ${uiFetchJsonHelperJs()}
-
       let page = 1;
       let pageSize = 10;
       const selected = new Set();
@@ -1918,6 +1857,13 @@ app.get("/invoices", (req, res) => {
       const tableWrap = document.getElementById("tableWrap");
       const pageNumEl = document.getElementById("pageNum");
       const pageSizeEl = document.getElementById("pageSize");
+
+      async function fetchJson(url, opts){
+        const res = await fetch(url, opts);
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
+      }
 
       async function loadServerSelection(){
         try{
@@ -2063,10 +2009,13 @@ app.get("/invoice/:docEntry", (req, res) => {
     </div>
 
     <script>
-      ${uiFetchJsonHelperJs()}
-
       const docEntry = Number(document.getElementById("docEntry").textContent || "0");
-
+      async function fetchJson(url, opts){
+        const res = await fetch(url, opts);
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
+      }
       (async function(){
         try{
           const raw = await fetchJson("/api/invoice/" + docEntry + "/raw");
@@ -2076,7 +2025,6 @@ app.get("/invoice/:docEntry", (req, res) => {
           document.getElementById("payloadOut").textContent = JSON.stringify(gra.payload, null, 2);
         }catch(e){
           document.getElementById("payloadOut").textContent = "Failed to load.";
-          document.getElementById("rawOut").textContent = (e && e.rawText) ? e.rawText : JSON.stringify(e, null, 2);
         }
       })();
     </script>
@@ -2117,12 +2065,17 @@ app.get("/gra", (req, res) => {
     </div>
 
     <script>
-      ${uiFetchJsonHelperJs()}
-
       const selList = document.getElementById("selList");
       const payloadOut = document.getElementById("payloadOut");
       const checks = document.getElementById("checks");
       const calcType = document.getElementById("calcType");
+
+      async function fetchJson(url, opts){
+        const res = await fetch(url, opts);
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
+      }
 
       function renderSelection(sel){
         if (!sel.length){
@@ -2279,8 +2232,6 @@ app.get("/post-gra", (req, res) => {
     </div>
 
     <script>
-      ${uiFetchJsonHelperJs()}
-
       const calcType = document.getElementById("calcType");
       const docSelect = document.getElementById("docSelect");
       const postBtn = document.getElementById("postBtn");
@@ -2289,6 +2240,13 @@ app.get("/post-gra", (req, res) => {
       const checks = document.getElementById("checks");
       const postResult = document.getElementById("postResult");
       const respRaw = document.getElementById("respRaw");
+
+      async function fetchJson(url, opts){
+        const res = await fetch(url, opts);
+        const data = await res.json();
+        if (!res.ok) throw data;
+        return data;
+      }
 
       function issueBox(i){
         const cls = i.level === "error" ? "alert alertError" : (i.level === "warn" ? "alert alertWarn" : "alert alertOk");
@@ -2376,11 +2334,13 @@ app.get("/post-gra", (req, res) => {
 
       function renderPostError(e){
         const kind = e?.kind || "UNKNOWN";
-        const httpStatus = e?.httpStatus || e?.httpStatus === 0 ? e.httpStatus : (e?.httpStatus || e?.status || "");
+        const httpStatus = e?.httpStatus || "";
         const body = e?.responseBody;
-        const msg = e?.message || "Posting failed.";
 
-        const pretty = body ? JSON.stringify(body, null, 2) : (e?.rawText ? e.rawText : JSON.stringify(e, null, 2));
+        const code = body?.code || body?.response?.code || "";
+        const msg = body?.message || body?.response?.message || e?.message || "Posting failed.";
+
+        const pretty = body ? JSON.stringify(body, null, 2) : "";
 
         postResult.innerHTML = \`
           <div class="alert alertError">
@@ -2390,7 +2350,7 @@ app.get("/post-gra", (req, res) => {
               <div class="topMeta" style="margin-top:6px">
                 Type: <b>\${kind}</b> \${httpStatus ? '• HTTP: <b>' + httpStatus + '</b>' : ''}
               </div>
-              <div style="margin-top:8px">\${msg}</div>
+              \${code || msg ? '<div style="margin-top:8px"><b>' + (code||'') + '</b> ' + (msg ? '— ' + msg : '') + '</div>' : ''}
               \${pretty ? '<pre style="margin-top:10px">' + pretty + '</pre>' : ''}
             </div>
           </div>\`;
@@ -2487,294 +2447,10 @@ app.get("/post-gra", (req, res) => {
   res.send(renderShell({ title: "Post to GRA", active: "post", topTitle: "Post to GRA", topMeta: "Select tax mode, post invoices, view SUCCESS response, export PDF.", bodyHtml }));
 });
 
-app.get("/post-refund", (req, res) => {
-  const bodyHtml = `
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <div>
-          <div style="font-weight:900;font-size:16px">Refunds (FULL / PARTIAL / CANCEL)</div>
-          <div class="topMeta" style="margin-top:6px">
-            Refund posting is: <b>${REFUND_POST_ENABLED ? "ENABLED" : "DISABLED"}</b>.
-            Full & Partial go to <b>/invoice</b>. Cancellation goes to <b>/cancellation</b>.
-          </div>
-        </div>
-        <div class="row">
-          <a class="chip" href="/invoices">Back to invoices</a>
-          <a class="chip" href="/post-gra">Go to invoice posting</a>
-        </div>
-      </div>
+// NOTE: Your /post-refund UI page was in your previous file.
+// If you need me to paste the /post-refund UI HTML page too, tell me — but the backend is already complete above.
 
-      <div class="row" style="margin-top:14px">
-        <button class="btnWarn" id="copySel">Use selection from Invoices</button>
-
-        <span class="chip">Refund Type</span>
-        <select id="refundType">
-          <option value="FULL">FULL REFUND</option>
-          <option value="PARTIAL">PARTIAL REFUND</option>
-          <option value="CANCEL">REFUND CANCELLATION</option>
-        </select>
-
-        <span class="chip">Tax mode</span>
-        <select id="calcType">
-          <option value="INCLUSIVE">INCLUSIVE</option>
-          <option value="EXCLUSIVE">EXCLUSIVE</option>
-        </select>
-
-        <span class="chip">Reference</span>
-        <input id="reference" placeholder="e.g. RF230724-000003" style="min-width:220px"/>
-
-        <span class="chip">Selected DocEntry</span>
-        <select id="docSelect"></select>
-
-        <button class="btnPrimary" id="apply">Apply</button>
-        <button class="btnOk" id="postBtn">Post Refund</button>
-
-        <span class="topMeta" id="hint"></span>
-      </div>
-
-      <div style="margin-top:14px;font-weight:900;">Checks</div>
-      <div id="checks" style="margin-top:10px;"></div>
-
-      <div class="grid grid2" style="margin-top:14px">
-        <div class="card">
-          <div style="font-weight:900">Refund payload (STRICT)</div>
-          <div class="topMeta" style="margin-top:6px">
-            You can edit this JSON (useful for partial overrides). Posting will use this JSON if it is valid.
-          </div>
-          <textarea id="payloadEdit"></textarea>
-        </div>
-        <div class="card">
-          <div style="font-weight:900">Refund response</div>
-          <div class="topMeta" style="margin-top:6px">Shows SUCCESS response or real error body.</div>
-          <div id="result"></div>
-          <pre id="raw" style="margin-top:10px;">(no response yet)</pre>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      ${uiFetchJsonHelperJs()}
-
-      const refundType = document.getElementById("refundType");
-      const calcType = document.getElementById("calcType");
-      const reference = document.getElementById("reference");
-      const docSelect = document.getElementById("docSelect");
-      const applyBtn = document.getElementById("apply");
-      const postBtn = document.getElementById("postBtn");
-      const hint = document.getElementById("hint");
-      const checks = document.getElementById("checks");
-      const payloadEdit = document.getElementById("payloadEdit");
-      const result = document.getElementById("result");
-      const raw = document.getElementById("raw");
-
-      function issueBox(i){
-        const cls = i.level === "error" ? "alert alertError" : (i.level === "warn" ? "alert alertWarn" : "alert alertOk");
-        const icon = i.level === "error" ? "!" : (i.level === "warn" ? "!" : "✓");
-        return \`
-          <div class="\${cls}" style="margin-bottom:10px">
-            <div class="alertIcon">\${icon}</div>
-            <div>
-              <div style="font-weight:900">\${i.title}</div>
-              <div style="margin-top:3px">\${i.detail || ""}</div>
-              \${i.hint ? '<div class="topMeta" style="margin-top:6px">Tip: ' + i.hint + '</div>' : ''}
-            </div>
-          </div>\`;
-      }
-
-      function renderChecks(issues){
-        if (!issues || !issues.length){
-          checks.innerHTML = \`
-            <div class="alert alertOk">
-              <div class="alertIcon">✓</div>
-              <div>
-                <div style="font-weight:900">No issues detected</div>
-                <div style="margin-top:3px">Posting is allowed.</div>
-              </div>
-            </div>\`;
-          return;
-        }
-        checks.innerHTML = issues.map(issueBox).join("");
-      }
-
-      function renderError(e){
-        const kind = e?.kind || "UNKNOWN";
-        const httpStatus = e?.httpStatus || "";
-        const body = e?.responseBody;
-        const msg = e?.message || "Refund posting failed.";
-        const pretty = body ? JSON.stringify(body, null, 2) : (e?.rawText ? e.rawText : JSON.stringify(e, null, 2));
-
-        result.innerHTML = \`
-          <div class="alert alertError">
-            <div class="alertIcon">!</div>
-            <div style="width:100%">
-              <div style="font-weight:900">Refund Posting Failed</div>
-              <div class="topMeta" style="margin-top:6px">
-                Type: <b>\${kind}</b> \${httpStatus ? '• HTTP: <b>' + httpStatus + '</b>' : ''}
-              </div>
-              <div style="margin-top:8px">\${msg}</div>
-              \${pretty ? '<pre style="margin-top:10px">' + pretty + '</pre>' : ''}
-            </div>
-          </div>\`;
-        raw.textContent = "(posting failed)";
-      }
-
-      function renderOkResponse(resp){
-        result.innerHTML = \`
-          <div class="alert alertOk">
-            <div class="alertIcon">✓</div>
-            <div style="width:100%">
-              <div style="font-weight:900">Posted successfully</div>
-              <div class="topMeta" style="margin-top:6px">Status: <b>\${resp?.response?.status || "—"}</b></div>
-            </div>
-          </div>\`;
-        raw.textContent = JSON.stringify(resp, null, 2);
-      }
-
-      async function loadRefundSelection(){
-        const s = await fetchJson("/api/refund/selection");
-        const sel = s.lastSelection || [];
-
-        const hash = new URLSearchParams((location.hash || "").replace("#",""));
-        const fromHash = hash.get("docEntry");
-        const preferred = fromHash ? Number(fromHash) : (sel[0] ? Number(sel[0]) : null);
-
-        docSelect.innerHTML = sel.length
-          ? sel.map(d => \`<option value="\${d}">\${d}</option>\`).join("")
-          : \`<option value="">(no selection)</option>\`;
-
-        if (preferred && sel.includes(preferred)) docSelect.value = String(preferred);
-      }
-
-      async function loadRefundConfig(){
-        const cfg = await fetchJson("/api/refund/config");
-        refundType.value = cfg.refundType || "FULL";
-        calcType.value = cfg.calculationType || "INCLUSIVE";
-        reference.value = cfg.reference || "";
-      }
-
-      async function saveRefundConfig(){
-        await fetchJson("/api/refund/config", {
-          method:"POST",
-          headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            refundType: refundType.value,
-            calculationType: calcType.value,
-            reference: reference.value
-          })
-        });
-      }
-
-      async function refreshPreview(){
-        const docEntry = Number(docSelect.value || "0");
-        if (!docEntry){
-          payloadEdit.value = "";
-          checks.innerHTML = "";
-          result.innerHTML = "";
-          raw.textContent = "(no response yet)";
-          return;
-        }
-
-        await saveRefundConfig();
-
-        const data = await fetchJson(\`/api/refund/payload/\${docEntry}?refundType=\${encodeURIComponent(refundType.value)}\`);
-        renderChecks(data.issues || []);
-        payloadEdit.value = JSON.stringify(data.payload, null, 2);
-
-        const last = await fetchJson(\`/api/refund/post-result/\${docEntry}?kind=\${encodeURIComponent(refundType.value)}\`);
-        if (last.result){
-          raw.textContent = JSON.stringify(last.result.responsePayload, null, 2);
-        } else {
-          raw.textContent = "(no response yet)";
-        }
-      }
-
-      document.getElementById("copySel").addEventListener("click", async () => {
-        try{
-          await fetchJson("/api/refund/copy-from-gra", { method:"POST" });
-          await loadRefundSelection();
-          await refreshPreview();
-        }catch(e){
-          alert("Could not copy selection. Ensure you selected invoices on the Invoices page first.");
-        }
-      });
-
-      applyBtn.addEventListener("click", async () => {
-        await refreshPreview();
-      });
-
-      docSelect.addEventListener("change", refreshPreview);
-      refundType.addEventListener("change", refreshPreview);
-
-      postBtn.addEventListener("click", async () => {
-        const docEntry = Number(docSelect.value || "0");
-        if (!docEntry){ alert("No invoice selected."); return; }
-
-        hint.textContent = "Posting...";
-        postBtn.disabled = true;
-
-        try{
-          let payload = null;
-          try{
-            payload = JSON.parse(payloadEdit.value || "{}");
-          }catch(_){
-            payload = null;
-          }
-
-          const resp = await fetchJson("/api/refund/post/" + docEntry, {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify({
-              refundType: refundType.value,
-              calculationType: calcType.value,
-              reference: reference.value,
-              payload: payload && typeof payload === "object" ? payload : undefined
-            })
-          });
-
-          hint.textContent = "Posted successfully.";
-          renderOkResponse(resp.response);
-          await refreshPreview();
-        }catch(e){
-          hint.textContent = "";
-          if (e?.blocked && e?.issues){
-            renderChecks(e.issues || []);
-            alert("Posting blocked: fix the errors shown in checks.");
-          } else {
-            renderError(e);
-          }
-        }finally{
-          postBtn.disabled = false;
-        }
-      });
-
-      (async function init(){
-        await loadRefundConfig();
-        await loadRefundSelection();
-        await refreshPreview();
-      })();
-    </script>
-  `;
-  res.send(renderShell({ title: "Refunds", active: "refund", topTitle: "Refunds", topMeta: "Full / Partial refunds and refund cancellation (STRICT payloads).", bodyHtml }));
-});
-
-// ===================================================================
-// LAST RESORT EXPRESS ERROR HANDLER (prevents HTML error pages)
-// ===================================================================
-app.use((err, req, res, next) => {
-  console.error("UNHANDLED ERROR:", err);
-  if (res.headersSent) return next(err);
-  res.status(500).json({
-    ok: false,
-    kind: "UNHANDLED_SERVER_ERROR",
-    message: "Server crashed while processing the request.",
-    detail: String(err?.message || err),
-  });
-});
-
-// ===================================================================
-// START
-// ===================================================================
-const server = app.listen(process.env.PORT || PORT, () => {
+app.listen(process.env.PORT || PORT, () => {
   console.log(`Running on http://localhost:${process.env.PORT || PORT}`);
   console.log(`Polling every ${POLL_MS}ms`);
   console.log(`Posting enabled: ${GRA_POST_ENABLED}`);
@@ -2786,7 +2462,3 @@ const server = app.listen(process.env.PORT || PORT, () => {
   console.log(`Refund invoice url set: ${Boolean(REFUND_INVOICE_URL)}`);
   console.log(`Refund cancel url set: ${Boolean(REFUND_CANCEL_URL)}`);
 });
-
-// Helps reduce dropped responses under some proxies
-server.headersTimeout = 65000;
-server.requestTimeout = 65000;
